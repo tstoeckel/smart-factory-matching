@@ -1,15 +1,45 @@
-# Smart Factory Matching Engine Documentation
+# Smart Factory Matching Engine Documentation (Final)
 
-This document describes the structure, functionality, and usage of the Smart Factory Matching Engine.
-The engine matches customer assessments (problems, processes, maturity levels, and impacts) against a master library of Smart Factory Use Cases.
-It computes relevance scores, applies filtering and weighting logic, and outputs the best-fitting Use Cases for each assessment.
+The **Smart Factory Matching Engine** helps manufacturing companies identify the most relevant digitalization Use Cases based on their operational problems, maturity goals, and strategic impact priorities.
+It translates qualitative assessment data into ranked Use Case recommendations using semantic matching, contextual filtering, and quantitative weighting.
 
 ---
 
 ## Overview
 
-The Smart Factory Matching Engine combines semantic matching, contextual filtering, and quantitative weighting.
-It is designed to help industrial companies identify the most relevant digitalization Use Cases based on their operational challenges and digital maturity.
+The engine compares customer assessments with a library of Smart Factory Use Cases.
+Each assessment describes the customer’s challenges, target maturity, and strategic focus.
+The engine scores all Use Cases, applies process and maturity filters, and produces a ranked recommendation list.
+
+**Goal:**
+To provide consistent, explainable, and data-driven Use Case recommendations aligned with a company’s maturity and strategic priorities.
+
+---
+
+## Input and Output
+
+**Input Files**
+- `assessment_db.csv`:  Customer assessments containing processes, problem statements, maturity levels, and impact preferences.
+- `uc_problems_db.json`: Master Use Case library including Use Case metadata, processes, maturity levels, impact tags, and problem texts.
+
+**Output Files**
+- `assessment_db.csv`: Updated with a new column `MATCHES_SCORED` containing the top-ranked Use Cases and their scores.
+- Console output for inspection (`--inspect`) and comparison (`--compare`) modes.
+
+---
+
+## Example Input/Output Pair
+
+**Input Row (from assessment_db.csv):**
+```csv
+CREATED_AT,EMAIL,PROCESSES,PROBLEM_TEXTS,MATURITY_LEVELS,IMPACT_PRIORITIES
+2024-06-25 10:44:48,artur.retkiewicz@mahle.com,"Produktionsplanung; Prozessoptimierung","lange lieferzeiten; manuelle planung","Autonom","Kosten: 10; Liefertreue: 8"
+```
+
+**Output Row (after matching):**
+```csv
+2024-06-25 10:44:48,artur.retkiewicz@mahle.com,"Produktionsplanung; Prozessoptimierung","lange lieferzeiten; manuelle planung","Autonom","Kosten: 10; Liefertreue: 8","UC-21: 0.461; UC-7: 0.419; UC-15: 0.386"
+```
 
 ---
 
@@ -67,11 +97,13 @@ New top-10 Use Cases computed by the current matching engine using the additive 
 The matching logic evaluates Use Cases from the master database (`uc_problems_db.json`) against customer assessments in `assessment_db.csv`.
 Each Use Case is scored using a combination of **problem-text overlap**, **impact alignment**, **maturity fit**, and **process relevance**.
 
-The overall scoring model is **additive** (not multiplicative) to ensure proportional weighting and intuitive interpretation.
+The overall scoring model is **additive** to ensure proportional weighting and intuitive interpretation.
 
 ### Scoring Formula
 
-`final_score = 0.5 * base + 0.25 * impact + 0.15 * maturity + 0.10 * process`
+```
+final_score = 0.5 * base + 0.25 * impact + 0.15 * maturity + 0.10 * process
+```
 
 | Weight | Factor | Description |
 |:-------|:--------|:------------|
@@ -101,6 +133,25 @@ This ensures that results from unfiltered assessments receive slightly lower ove
 
 In both cases, the process factor contributes up to **10%** of the total matching score (`process_weight × 0.10`).
 This design maintains consistency between filtered and unfiltered modes — enabling focused recommendations when process data is available, and balanced general matching otherwise.
+
+---
+
+## Digital Base Use Cases (“Digitale Datenbasis”)
+
+“Digital Base" Use Cases represent **foundational digital enablers** — the technological groundwork required for all higher-level Smart Factory functions.
+They include capabilities such as data acquisition, integration, connectivity, visualization, and secure storage.
+
+Because these Use Cases apply broadly across nearly every process area, they tend to match a large number of problem statements.
+Without special handling, they could dominate the top-ranked results and overshadow more process-specific Use Cases.
+
+To maintain a balanced recommendation list, the matching engine applies a **special weighting rule** for “Digitale Datenbasis” Use Cases:
+
+- When a **process filter is defined**, these Use Cases remain eligible but receive a **reduced process weight** (`0.8` instead of `1.0`).
+- When **no process filter** is defined, they are treated like any other Use Case and receive a **neutral weight** (`1.0`).
+- If the customer explicitly selects “Digitale Datenbasis” as a process, they receive the **full weight** (`1.0`).
+
+This ensures that foundational Use Cases appear as relevant enablers without overshadowing process-specific results.
+The result is a balanced mix of **digital infrastructure** and **operational** Use Cases that align with the customer’s priorities.
 
 ---
 
@@ -139,8 +190,8 @@ It displays:
 - The **comparison table** of old vs. new Use Case rankings, scores, and maturity levels.
 - The **overlap percentage** between the old and new results.
 
-The previous rank-shift chart visualization has been removed for clarity.
-The console output now focuses on a clear, textual comparison table that shows rank and maturity level for each Use Case.
+The rank-shift chart visualization has been removed for clarity.
+The console output now focuses on a clear textual comparison table that shows rank and maturity level for each Use Case.
 
 ---
 
@@ -149,7 +200,6 @@ The console output now focuses on a clear, textual comparison table that shows r
 **Example assessment:** `2024-06-25 / artur.retkiewicz@mahle.com`
 
 **Customer setup:**
-
 - Processes: `Bedarfsmanagement; Supply Chain Management & Beschaffung; Produktionsplanung; Prozessoptimierung`
 - Maturity level: `Autonom`
 - Impact priorities: `Kosten: 10; Liefertreue: 8`
@@ -184,3 +234,14 @@ The old engine proposed diagnostizierende intralogistics Use Cases (UC-11, UC-12
 The new algorithm enforces both maturity and process filters, returning UCs relevant to the requested maturity tier and process scope.
 Score differences arise from normalization (0–1 range) and additive weighting.
 The 33% overlap confirms consistent top-tier Use Cases while reflecting improved contextual precision.
+
+---
+
+## Summary
+
+The Smart Factory Matching Engine combines text-based similarity, impact alignment, maturity compliance, and process filtering into a coherent and explainable scoring system.
+By transforming both process and maturity selections into explicit filters, and by using additive rather than multiplicative scoring, it delivers transparent, interpretable, and reproducible Use Case recommendations.
+
+---
+
+**End of Document**
