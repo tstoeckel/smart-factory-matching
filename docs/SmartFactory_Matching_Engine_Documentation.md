@@ -1,258 +1,186 @@
-# Smart Factory Use Case Matching Engine – Documentation
+# Smart Factory Matching Engine Documentation
 
-## 1. Overview
+This document describes the structure, functionality, and usage of the Smart Factory Matching Engine.
+The engine matches customer assessments (problems, processes, maturity levels, and impacts) against a master library of Smart Factory Use Cases.
+It computes relevance scores, applies filtering and weighting logic, and outputs the best-fitting Use Cases for each assessment.
 
-The Smart Factory Matching Engine automatically recommends relevant
-Smart Factory Use Cases based on customer assessments. It evaluates
-problem statements, strategic priorities, process selections, and
-maturity levels, then identifies matching Use Cases from a structured
-knowledge base.
+---
 
-## 2. Project Files
+## Overview
 
-<table>
-<colgroup>
-<col style="width: 50%" />
-<col style="width: 50%" />
-</colgroup>
-<thead>
-<tr>
-<th>File</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>assessment_db.csv</td>
-<td>Main database of assessments and match results. Each row represents
-a single customer assessment, including processes, problems, impacts,
-and resulting top Use Cases.</td>
-</tr>
-<tr>
-<td>uc_problems_db.json</td>
-<td>Master library of Smart Factory Use Cases, including metadata such
-as name, processes, maturity level, impacts, and problem texts.</td>
-</tr>
-<tr>
-<td>matching_engine.py</td>
-<td>Python script implementing the matching engine, handling matching
-logic, weighting, peer relations, inspection, and comparison modes.</td>
-</tr>
-</tbody>
-</table>
+The Smart Factory Matching Engine combines semantic matching, contextual filtering, and quantitative weighting.
+It is designed to help industrial companies identify the most relevant digitalization Use Cases based on their operational challenges and digital maturity.
 
-## 3. Structure of assessment\_db.csv
+---
 
-This CSV file stores all assessments collected from customers. Columns:
+## Project Files
 
-<table>
-<colgroup>
-<col style="width: 50%" />
-<col style="width: 50%" />
-</colgroup>
-<thead>
-<tr>
-<th>Column</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>CREATED_AT</td>
-<td>Timestamp (YYYY-MM-DD HH:MM:SS). Together with EMAIL, forms the
-primary key.</td>
-</tr>
-<tr>
-<td>EMAIL</td>
-<td>Email address identifying the customer.</td>
-</tr>
-<tr>
-<td>PROCESSES</td>
-<td>Semicolon-separated list of process steps selected by the customer
-(e.g. 'Produktionsplanung; Qualitätsmanagement').</td>
-</tr>
-<tr>
-<td>PROBLEM_TEXTS</td>
-<td>Normalized list of problem statements describing operational
-challenges.</td>
-</tr>
-<tr>
-<td>MATURITY_LEVELS</td>
-<td>Desired maturity levels selected by the customer (e.g.
-'Diagnostizierend; Vorhersagend; Autonom').</td>
-</tr>
-<tr>
-<td>IMPACT_PRIORITIES</td>
-<td>Strategic impact focus of the customer (e.g. 'Kosten: 8; Qualität:
-6; Liefertreue: 5').</td>
-</tr>
-<tr>
-<td>OLD_MATCHES_SCORED</td>
-<td>Historical top-10 Use Cases with their old algorithm scores.</td>
-</tr>
-<tr>
-<td>MATCHES_SCORED</td>
-<td>New top-10 Use Cases computed by the current matching engine with
-additive scoring model.</td>
-</tr>
-</tbody>
-</table>
+**assessment_db.csv**
+Main database of assessments and match results. Each row represents a single customer assessment, including processes, problem statements, impact preferences, and the resulting top Use Cases.
 
-## 4. Structure of uc\_problems\_db.json
+**uc_problems_db.json**
+Master library of Smart Factory Use Cases. Contains metadata such as Use Case names, associated processes, maturity levels, impact categories, and problem text definitions.
 
-This JSON file defines all Smart Factory Use Cases. Each Use Case entry
-contains metadata used for matching and scoring. Example structure:
+**matching_engine.py**
+Python script implementing the matching engine. It handles Use Case matching logic, scoring and weighting, peer relation analysis, inspection mode (`--inspect`), and comparison mode (`--compare`).
 
-```json
-{
-    "id": 6,
-    "name": {
-        "de": "Bedarfsvorhersage",
-        "en": "Demand Forecasting"
-    },
-    "processes": [
-        { "label": { "de": "Bedarfsmanagement", "en": "Demand Management" } },
-        { "label": { "de": "Produktionsplanung", "en": "Production Planning" } }
-    ],
-    "maturity_level": { "label": { "de": "Vorhersagend", "en": "Predictive" } },
-    "impact": [
-        { "label": { "de": "Kosten", "en": "Cost" }, "value": 8 },
-        { "label": { "de": "Qualität", "en": "Quality" }, "value": 5 },
-        { "label": { "de": "Liefertreue", "en": "Delivery Reliability" }, "value": 7 }
-    ],
-    "problems_tackled": [
-        {
-            "problem_text": {
-                "de": "Nachfrageschwankungen führen zu ineffizienter Planung",
-                "en": "Demand fluctuations cause inefficient planning"
-            }
-        },
-        {
-            "problem_text": {
-                "de": "Manuelle Anpassung der Bedarfsplanung",
-                "en": "Manual adjustment of demand plans"
-            }
-        }
-    ]
-}
-```
+When executed **without any arguments**, the script automatically performs batch matching across all available assessments, recomputing missing or outdated `MATCHES_SCORED` entries in the `assessment_db.csv` file.
+When executed with the **`--recompute-all`** argument, the engine ignores existing scores and fully recomputes the matching results for every assessment in the database.
 
-The JSON typically contains 30–50 Use Cases. Each entry contributes
-problem texts for semantic matching, impact values for strategic
-weighting, and maturity/process tags for structural relevance.
+These modes ensure that both incremental updates and full recomputations can be performed efficiently, maintaining the integrity and currency of the assessment database.
 
-## 5. Matching Logic
+---
 
-1. Normalize problem statements for both assessment and Use Cases.
+## Structure of `assessment_db.csv`
 
-2. Perform soft matching via token overlap and sentence prefix
-    similarity.
+**CREATED_AT**
+Timestamp in the format `YYYY-MM-DD HH:MM:SS`. Together with **EMAIL**, this forms the primary key for each assessment entry.
 
-3. Build peer relations among Use Cases in the same process based
-    on ≥30% Jaccard overlap.
+**EMAIL**
+Email address identifying the customer.
 
-4. Compute maturity weights (bottom-up: simpler UCs are preferred).
+**PROCESSES**
+Semicolon-separated list of process steps selected by the customer, for example:
+`Produktionsplanung; Qualitätsmanagement`.
 
-5. Compute impact weights aligning UC impact dimensions with
-    customer strategic priorities (0.1–1.0 scale).
+**PROBLEM_TEXTS**
+Normalized list of problem statements describing operational challenges identified by the customer.
 
-6. Filter Use Cases by selected processes if provided.
+**MATURITY_LEVELS**
+Desired maturity levels selected by the customer, for example:
+`Diagnostizierend; Vorhersagend; Autonom`.
 
-7. Compute additive final score: 0.5×Base + 0.25×Impact +
-    0.15×Maturity + 0.10×Process.
+**IMPACT_PRIORITIES**
+Strategic impact focus of the customer, for example:
+`Kosten: 8; Qualität: 6; Liefertreue: 5`.
 
-8. Rank and output top 10 Use Cases per assessment to
-    MATCHES\_SCORED.
+**OLD_MATCHES_SCORED**
+Historical top-10 Use Cases with their scores computed by the old algorithm.
 
-## 6. Script Usage
+**MATCHES_SCORED**
+New top-10 Use Cases computed by the current matching engine using the additive scoring model.
 
-Run the matching engine with different modes:
+---
 
-• Batch recomputation: python matching\_engine.py — recomputes missing
-MATCHES\_SCORED or all (--recompute-all).
+## Matching Logic
 
-• Inspect mode: python matching\_engine.py --inspect '&lt;timestamp&gt;'
-'&lt;email&gt;' — runs detailed match analysis for one assessment.
+The matching logic evaluates Use Cases from the master database (`uc_problems_db.json`) against customer assessments in `assessment_db.csv`.
+Each Use Case is scored using a combination of **problem-text overlap**, **impact alignment**, **maturity fit**, and **process relevance**.
 
-• Comparison mode: python matching\_engine.py --compare
-'&lt;timestamp&gt;' '&lt;email&gt;' — compares old and new results with
-visualization.
+The overall scoring model is **additive** (not multiplicative) to ensure proportional weighting and intuitive interpretation.
 
-## 7. Scoring Weights
+### Scoring Formula
 
-Final scoring weights:
+`final_score = 0.5 * base + 0.25 * impact + 0.15 * maturity + 0.10 * process`
 
-• Base (problem similarity): 50%
+| Weight | Factor | Description |
+|:-------|:--------|:------------|
+| 0.5 | **Base Match** | Problem text similarity between the assessment and the Use Case. |
+| 0.25 | **Impact** | Degree to which the Use Case contributes to the customer’s prioritized impact areas (e.g. cost, quality, delivery reliability). |
+| 0.15 | **Maturity** | Alignment of the Use Case’s maturity level with the customer’s desired maturity. |
+| 0.10 | **Process** | Relevance of the Use Case’s process domain to the customer’s selected processes. |
 
-• Impact alignment: 25%
-
-• Maturity alignment: 15%
-
-• Process relevance: 10%
-
-The matching engine applies a strict process filter when customers
-specify one or more process steps in their assessment (e.g.,
-'Produktionsplanung', 'Instandhaltung', 'Qualitätsmanagement'). Only Use
-Cases belonging to the selected processes are considered for scoring.
-This ensures contextual relevance and prevents unrelated Use Cases
-(e.g., logistics or maintenance) from appearing when the user focuses on
-planning or quality. If no process filter is provided, the engine
-includes all Use Cases but slightly reduces their process relevance
-score through the compute\_process\_spread\_weight() function. Together
-with maturity and impact filters, process filtering forms one of the
-three key constraints defining which Use Cases enter the scoring stage.
+---
 
 ## Process Filtering
 
+The matching engine applies a **strict process filter** whenever customers specify one or more process steps in their assessment (e.g. `Produktionsplanung`, `Instandhaltung`, `Qualitätsmanagement`).
+Only Use Cases within these processes are considered for scoring.
+If no processes are provided, all Use Cases remain eligible, but their process relevance is slightly down-weighted (`0.8`) through the process weighting function.
+
+This ensures that results remain focused when process data is available, while still producing balanced recommendations when no process filter is specified.
+
+---
+
+## Process Weighting Logic
+
+When a customer specifies one or more processes in the assessment (e.g. `Produktionsplanung`, `Instandhaltung`, `Qualitätsmanagement`), these act as a **strict filter**: only Use Cases belonging to at least one of the selected processes are considered for matching.
+
+When no process information is provided, the engine does not filter out any Use Cases but applies a **global process weighting factor** (`process_weight = 0.8`).
+This ensures that results from unfiltered assessments receive slightly lower overall scores, reflecting the broader and less focused context.
+
+In both cases, the process factor contributes up to **10%** of the total matching score (`process_weight × 0.10`).
+This design maintains consistency between filtered and unfiltered modes — enabling focused recommendations when process data is available, and balanced general matching otherwise.
+
+---
+
 ## Maturity Level Filtering
 
-The matching engine now includes a direct maturity-level filtering
-feature. When a customer selects a target maturity level (e.g.,
-'Autonom', 'Vorhersagend'), the engine restricts its recommendations to
-Use Cases at that level. This ensures that the results align with the
-customer's intended technological or process maturity tier. Optionally,
-a fuzzy filter can include Use Cases one level above or below the target
-tier for broader inspiration.
+The matching engine now supports explicit **maturity-level filtering**.
+When the customer specifies a target maturity level (e.g. `Autonom`, `Vorhersagend`), the engine restricts its recommendations to Use Cases at that level.
+Optionally, a fuzzy filter can include Use Cases one level above or below the selected tier for broader exploration.
 
-This replaces the earlier implicit maturity weighting approach. Now, the
-maturity parameter acts as a strict filter instead of only adjusting the
-score.
+This replaces the older implicit weighting system, making maturity selection a hard filter rather than a scoring adjustment.
+
+---
+
+## Impact Weighting
+
+Impact preferences (`Kosten`, `Qualität`, `Liefertreue`) are always used as **weights**, not filters.
+Each Use Case’s impact profile is compared to the customer’s priorities to compute an **impact alignment score** between 0.0 and 1.0.
+This score influences up to **25%** of the total matching score.
+
+---
+
+## Peer Relations
+
+Use Cases that address similar problems within the same process are treated as **peers**.
+If peers exist with lower maturity levels, the maturity weighting of higher-level peers is adjusted accordingly to prevent premature over-recommendation.
+This ensures that simpler, prerequisite Use Cases are ranked higher when appropriate.
+
+---
 
 ## Enhanced Compare Mode
 
-The \`--compare\` function now prints all active filters for an
-assessment — including process, impact, and maturity filters — and
-displays each Use Case's actual maturity level directly in the
-comparison table. This provides a transparent view of how the filtering
-logic influenced the final rankings.
+The `--compare` command provides detailed diagnostics for any single assessment.
+It displays:
 
-The previous rank-shift chart visualization has been removed. The
-console output now focuses on a clean, readable table that shows ranks,
-scores, and maturity levels side by side.
+- Applied **process**, **impact**, and **maturity filters**.
+- The **comparison table** of old vs. new Use Case rankings, scores, and maturity levels.
+- The **overlap percentage** between the old and new results.
+
+The previous rank-shift chart visualization has been removed for clarity.
+The console output now focuses on a clear, textual comparison table that shows rank and maturity level for each Use Case.
+
+---
 
 ## Example: Maturity Filtering in Action
 
-Example: Assessment 2024-06-25 / <artur.retkiewicz@mahle.com>
+**Example assessment:** `2024-06-25 / artur.retkiewicz@mahle.com`
 
-Customer setup:
+**Customer setup:**
 
-- Processes: Bedarfsmanagement, Supply Chain Management & Beschaffung, Produktionsplanung, Prozessoptimierung
-- Maturity level: Autonom
-- Impact priorities: Kosten: 10; Liefertreue: 8
+- Processes: `Bedarfsmanagement; Supply Chain Management & Beschaffung; Produktionsplanung; Prozessoptimierung`
+- Maturity level: `Autonom`
+- Impact priorities: `Kosten: 10; Liefertreue: 8`
 
-Old results:
+**Old results:** UC-12, UC-15, UC-11 (Autonome Intralogistik & Bestandsführung)
+**New results:** UC-21, UC-7, UC-15 (Autonome Produktionsplanung, Autonome Bedarfsprognose, Autonomes SCM)
 
-- UC-12, UC-15, UC-11 (Autonome Intralogistik & Bestandsführung)
+**Overlap:** 33%
 
-New results:
+**Interpretation:**
+With maturity filtering active, only advanced Use Cases are selected.
+The new engine produces results consistent with both the specified process filters and the target maturity level.
+The old algorithm included unrelated intralogistics Use Cases because it ignored process and maturity constraints.
+This example demonstrates how the updated logic improves contextual precision and relevance.
 
-- UC-21, UC-7, UC-15 (Autonome Produktionsplanung, Autonome
-Bedarfsprognose, Autonomes SCM)
-- Overlap: 33%
+---
 
-Interpretation:
+## Case Study: Score Divergence Analysis
 
-- With maturity filtering active, only advanced Use Cases are selected
-- The new engine delivers results consistent with both process and
-maturity filters, while the old algorithm produced unrelated
-intralogistics matches. This demonstrates how the updated logic improves contextual precision and relevance.
+**Assessment:** `2024-06-25 / artur.retkiewicz@mahle.com`
+
+| Aspect | Old System | New System |
+|:--|:--|:--|
+| **Top Use Cases** | UC-12, UC-15, UC-11 | UC-21, UC-7, UC-15 |
+| **Overlap** | 33% (UC-15 only) | — |
+| **Process Filtering** | Ignored | Active |
+| **Maturity Filtering** | Ignored | Strict (“Autonom”) |
+| **Scoring Model** | Unknown (rule-based) | Additive weighted model (0–1 scale) |
+
+**Interpretation:**
+The old engine proposed diagnostizierende intralogistics Use Cases (UC-11, UC-12) despite the customer targeting autonomous planning.
+The new algorithm enforces both maturity and process filters, returning UCs relevant to the requested maturity tier and process scope.
+Score differences arise from normalization (0–1 range) and additive weighting.
+The 33% overlap confirms consistent top-tier Use Cases while reflecting improved contextual precision.
