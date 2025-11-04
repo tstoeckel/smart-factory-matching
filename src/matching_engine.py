@@ -46,6 +46,10 @@ def get_uc_processes(uc):
     return processes
 
 
+def is_base_uc(uc):
+    label = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
+    return "digitale datenbasis" in label
+
 def build_peer_relations(usecases, overlap_threshold=0.3):
     uc_problem_sets = []
     for uc in usecases:
@@ -95,11 +99,6 @@ def compute_maturity_weight(uc, peer_relations, usecases, debug=False):
         factor = 1.0 + (-0.2 * level_diff)
     elif MATURITY_MODE == "top_down":
         factor = 1.0 + (0.2 * level_diff)
-
-    uc_procs = get_uc_processes(uc)
-    if any("digitale datenbasis" in p for p in uc_procs):
-        factor *= 0.9
-
     if debug:
         print(f"[DEBUG] UC-{uc_id} | diff={level_diff} | factor={factor:.2f}")
     return max(0.6, min(1.4, factor))
@@ -120,12 +119,21 @@ def compute_impact_weight(uc_impact, customer_impact):
 
 
 def compute_process_spread_weight(uc, customer_processes):
+    # Documented behavior: base UCs (Digitale Datenbasis) are neutral when no process filter;
+    # when a filter is active, reduce to 0.8 unless explicitly selected. Non-base UCs use 1.0 on overlap,
+    # 0.8 otherwise.
     if not customer_processes:
-        return 0.8
-    uc_procs = get_uc_processes(uc)
-    overlap = len(set(uc_procs) & set([p.lower() for p in customer_processes]))
-    return 1.0 if overlap else 0.8
+        return 1.0 if is_base_uc(uc) else 0.8
 
+    uc_procs = get_uc_processes(uc)
+    selected = set([p.lower() for p in customer_processes])
+    overlap = bool(set(uc_procs) & selected)
+
+    if is_base_uc(uc):
+        # Reduced when a filter is active unless explicitly selected
+        return 1.0 if overlap else 0.8
+    # Non-base UCs: 1.0 if overlapping a selected process, else 0.8
+    return 1.0 if overlap else 0.8
 
 # ---------------------------------------------------------------------
 # Matching logic
