@@ -1,15 +1,19 @@
 """
-Smart Factory Matching Engine – Clean Version v8.0
-Last updated: 2025-10-21
+Smart Factory Matching Engine – Patched Version
 
 This script computes Use Case matches for Smart Factory assessments based on problem similarity,
-impact priorities, maturity levels, and process filters. It also provides batch processing and overlap analysis.
+impact priorities, maturity levels, and process filters. It also provides batch processing,
+overlap analysis, single-inspect, and old-vs-new comparison with UC names.
 """
 
 import pandas as pd
 import json
 import re
 import argparse
+
+# ---------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------
 
 ASSESSMENT_DB = "data/assessment_db.csv"
 USECASE_DB = "data/uc_problems_db.json"
@@ -18,24 +22,20 @@ OVERLAP_THRESHOLD = 0.3
 MATURITY_MODE = "bottom_up"  # or 'top_down'
 TOP_LIMIT = 10
 
-
 # ---------------------------------------------------------------------
-# Helper functions
+# Helpers
 # ---------------------------------------------------------------------
-
 
 def prepare_assessment_problems(text):
     if not isinstance(text, str) or not text.strip():
         return []
     return [t.strip().lower() for t in text.split(";") if t.strip()]
 
-
 def parse_customer_impact(text):
     if not isinstance(text, str) or not text.strip():
         return {}
     pairs = re.findall(r"([A-Za-zäöüÄÖÜß ]+):\s*([\d.]+)", text)
     return {k.strip().lower(): float(v) for k, v in pairs}
-
 
 def get_uc_processes(uc):
     processes = []
@@ -45,8 +45,8 @@ def get_uc_processes(uc):
             processes.append(label)
     return processes
 
-
 def is_base_uc(uc):
+    # Detects Digitale Datenbasis via maturity level label (German)
     label = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
     return "digitale datenbasis" in label
 
@@ -75,18 +75,17 @@ def build_peer_relations(usecases, overlap_threshold=0.3):
             if overlap >= overlap_threshold:
                 peers.append(j)
         peer_relations[i] = peers
-    return peer_relations
-
+    return peer_relations, uc_problem_sets
 
 # ---------------------------------------------------------------------
 # Core scoring components
 # ---------------------------------------------------------------------
 
-
 def compute_maturity_weight(uc, peer_relations, usecases, debug=False):
     uc_id = uc.get("id")
     base_rank = uc.get("maturity_rank", 3)
-    peers = peer_relations.get(uc_id - 1, [])
+    # peer_relations keys are zero-based indices; uc ids are assumed consecutive from 0
+    peers = peer_relations.get(uc_id, [])
     if not peers:
         return 1.0
 
@@ -99,10 +98,11 @@ def compute_maturity_weight(uc, peer_relations, usecases, debug=False):
         factor = 1.0 + (-0.2 * level_diff)
     elif MATURITY_MODE == "top_down":
         factor = 1.0 + (0.2 * level_diff)
+
+    # Patched: removed incorrect process-label penalty related to "digitale datenbasis"
     if debug:
         print(f"[DEBUG] UC-{uc_id} | diff={level_diff} | factor={factor:.2f}")
     return max(0.6, min(1.4, factor))
-
 
 def compute_impact_weight(uc_impact, customer_impact):
     if not customer_impact or not uc_impact:
@@ -117,11 +117,14 @@ def compute_impact_weight(uc_impact, customer_impact):
         return 1.0
     return max(0.1, min(1.0, num / (10 * den)))
 
-
 def compute_process_spread_weight(uc, customer_processes):
-    # Documented behavior: base UCs (Digitale Datenbasis) are neutral when no process filter;
-    # when a filter is active, reduce to 0.8 unless explicitly selected. Non-base UCs use 1.0 on overlap,
-    # 0.8 otherwise.
+    """
+    Documented behavior:
+    - Base UCs (Digitale Datenbasis): neutral when no process filter (1.0).
+      When a filter is active, reduced (0.8) unless explicitly selected (1.0).
+    - Non-base UCs: 1.0 on overlap; 0.8 otherwise. With strict filtering, overlap is guaranteed
+      for selected processes, but keep the branch for completeness.
+    """
     if not customer_processes:
         return 1.0 if is_base_uc(uc) else 0.8
 
@@ -130,15 +133,12 @@ def compute_process_spread_weight(uc, customer_processes):
     overlap = bool(set(uc_procs) & selected)
 
     if is_base_uc(uc):
-        # Reduced when a filter is active unless explicitly selected
         return 1.0 if overlap else 0.8
-    # Non-base UCs: 1.0 if overlapping a selected process, else 0.8
     return 1.0 if overlap else 0.8
 
 # ---------------------------------------------------------------------
 # Matching logic
 # ---------------------------------------------------------------------
-
 
 def match_assessment(
     problems,
@@ -153,13 +153,13 @@ def match_assessment(
     results = []
     for uc, uc_problems in zip(usecases, uc_problem_sets):
 
-        # Process filtering
+        # Strict process filtering (doc-consistent)
         if customer_processes and not any(
             proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
         ):
             continue
 
-        # Maturity-level filtering
+        # Strict maturity-level filtering
         if customer_maturity_levels:
             uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
             if not any(level.lower() in uc_level for level in customer_maturity_levels):
@@ -174,7 +174,7 @@ def match_assessment(
         results.append(
             {
                 "use_case_id": uc["id"],
-                "use_case_name_de": uc["name"]["de"],
+                "use_case_name_de": uc.get("name", {}).get("de", ""),
                 "score": round(final, 3),
                 "base": base,
                 "impact": impact_weight,
@@ -184,11 +184,9 @@ def match_assessment(
         )
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
-
 # ---------------------------------------------------------------------
 # Overlap computation
 # ---------------------------------------------------------------------
-
 
 def compute_overlap_stats(df):
     def extract_uc_ids(cell):
@@ -219,11 +217,9 @@ def compute_overlap_stats(df):
     df["OVERLAP_COUNT"], df["OVERLAP_PERCENT"], df["COMMON_UCS"], df["OLD_ONLY"], df["NEW_ONLY"] = zip(*overlaps)
     return df
 
-
 # ---------------------------------------------------------------------
-# Batch matching
+# Batch recomputation
 # ---------------------------------------------------------------------
-
 
 def run_batch_matching(recompute_all=False):
     print(f"\n[Batch] Starting matching (recompute_all={recompute_all})...")
@@ -231,19 +227,7 @@ def run_batch_matching(recompute_all=False):
     usecases = json.load(open(USECASE_DB, "r", encoding="utf-8"))
     df = pd.read_csv(ASSESSMENT_DB, encoding="utf-8-sig")
 
-    uc_problem_sets = []
-    for uc in usecases:
-        ps = set()
-        for p in uc.get("problems_tackled", []):
-            de = p.get("problem_text", {}).get("de", "")
-            en = p.get("problem_text", {}).get("en", "")
-            if de:
-                ps.add(de.lower())
-            if en:
-                ps.add(en.lower())
-        uc_problem_sets.append(ps)
-
-    peer_relations = build_peer_relations(usecases, overlap_threshold=OVERLAP_THRESHOLD)
+    peer_relations, uc_problem_sets = build_peer_relations(usecases, overlap_threshold=OVERLAP_THRESHOLD)
     print(f"[Batch] Peer relations built for {len(peer_relations)} Use Cases. Mode={MATURITY_MODE}")
 
     if "MATCHES_SCORED" not in df.columns:
@@ -258,7 +242,8 @@ def run_batch_matching(recompute_all=False):
         row = df.loc[i]
         problems = prepare_assessment_problems(row.get("PROBLEM_TEXTS", ""))
         customer_impact = parse_customer_impact(row.get("IMPACT_PRIORITIES", ""))
-        customer_processes = [p.strip() for p in str(row.get("PROCESSES", "")).split(";") if p.strip()] or None
+        raw_procs = str(row.get("PROCESSES", "")).strip()
+        customer_processes = [p.strip() for p in raw_procs.split(";") if p.strip()] if raw_procs and raw_procs.lower() != "nan" else None
         customer_maturity_levels = [m.strip() for m in str(row.get("MATURITY_LEVELS", "")).split(";") if m.strip()]
 
         top_matches = match_assessment(
@@ -278,64 +263,51 @@ def run_batch_matching(recompute_all=False):
     df.to_csv(ASSESSMENT_DB, index=False, encoding="utf-8-sig")
     print(f"\n[Batch] ✅ Matching completed — results written to {ASSESSMENT_DB}")
 
-
 # ---------------------------------------------------------------------
 # Inspect single assessment
 # ---------------------------------------------------------------------
+
 def inspect_single_assessment(timestamp, email):
     usecases = json.load(open(USECASE_DB, "r", encoding="utf-8"))
     df = pd.read_csv(ASSESSMENT_DB, encoding="utf-8-sig")
 
     mask = (df["CREATED_AT"] == timestamp) & (df["EMAIL"].str.lower() == email.lower())
     if not mask.any():
-        print(f"[Inspect] ❌ No matching assessment found for {timestamp} / {email}")
+        print("[Inspect] ❌ No matching assessment found for", timestamp, "/", email)
         return
     row = df.loc[mask].iloc[0]
 
+    peer_relations, uc_problem_sets = build_peer_relations(usecases, overlap_threshold=OVERLAP_THRESHOLD)
     problems = prepare_assessment_problems(row.get("PROBLEM_TEXTS", ""))
     customer_impact = parse_customer_impact(row.get("IMPACT_PRIORITIES", ""))
-    customer_processes = [p.strip() for p in str(row.get("PROCESSES", "")).split(";") if p.strip()] or None
+    raw_procs = str(row.get("PROCESSES", "")).strip()
+    customer_processes = [p.strip() for p in raw_procs.split(";") if p.strip()] if raw_procs and raw_procs.lower() != "nan" else None
+    customer_maturity_levels = [m.strip() for m in str(row.get("MATURITY_LEVELS", "")).split(";") if m.strip()]
 
-    uc_problem_sets = []
-    for uc in usecases:
-        ps = set()
-        for p in uc.get("problems_tackled", []):
-            de = p.get("problem_text", {}).get("de", "")
-            en = p.get("problem_text", {}).get("en", "")
-            if de:
-                ps.add(de.lower())
-            if en:
-                ps.add(en.lower())
-        uc_problem_sets.append(ps)
-
-    peer_relations = build_peer_relations(usecases, overlap_threshold=OVERLAP_THRESHOLD)
-    print(f"[Inspect] Peer relations built for {len(peer_relations)} Use Cases. Mode={MATURITY_MODE}")
-
-    print("\n[Inspect] Input summary")
-    print("──────────────────────────────")
-    print(f"Customer processes: {customer_processes}")
-    print(f"Impact priorities: {customer_impact}")
-    print("Problems:")
-    for i, p in enumerate(problems, 1):
-        print(f"  {i}. {p}")
+    print("[Inspect] Peer relations built for", len(peer_relations), "Use Cases. Mode=", MATURITY_MODE)
+    print("Impact priorities:", customer_impact if customer_impact else "(none)")
+    if customer_maturity_levels:
+        print("Maturity level filter detected:", ", ".join(customer_maturity_levels))
+    else:
+        print("No maturity level filter applied.")
 
     top_matches = match_assessment(
-        problems, customer_impact, usecases, uc_problem_sets, peer_relations, customer_processes, debug=True
+        problems,
+        customer_impact,
+        usecases,
+        uc_problem_sets,
+        peer_relations,
+        customer_processes,
+        customer_maturity_levels,
+        debug=True,
     )
-
-    print("\n[Inspect] Top 10 Use Cases")
-    print("──────────────────────────────")
-    for rank, r in enumerate(top_matches[:10], 1):
-        print(
-            f"{rank:2d}. UC-{r['use_case_id']} - {r['use_case_name_de']} | "
-            f"Score={r['score']} (Base={r['base']:.3f}, Impact={r['impact']:.3f}, "
-            f"Mat={r['maturity']:.2f}, Proc={r['process']:.2f})"
-        )
-
+    for r in top_matches[:TOP_LIMIT]:
+        print(f"UC-{r['use_case_id']} ({r['use_case_name_de']}): Score={r['score']} (Base={r['base']:.3f}, Impact={r['impact']:.2f}, Mat={r['maturity']:.2f}, Proc={r['process']:.2f})")
 
 # ---------------------------------------------------------------------
-# Compare old vs new results
+# Compare old vs new for one assessment (with UC names)
 # ---------------------------------------------------------------------
+
 def compare_old_new(timestamp, email):
     df = pd.read_csv(ASSESSMENT_DB, encoding="utf-8-sig")
     mask = (df["CREATED_AT"] == timestamp) & (df["EMAIL"].str.lower() == email.lower())
@@ -346,9 +318,7 @@ def compare_old_new(timestamp, email):
     row = df.loc[mask].iloc[0]
 
     raw_procs = str(row.get("PROCESSES", "")).strip()
-    processes = (
-        [p.strip() for p in raw_procs.split(";") if p.strip()] if raw_procs and raw_procs.lower() != "nan" else []
-    )
+    processes = ([p.strip() for p in raw_procs.split(";") if p.strip()] if raw_procs and raw_procs.lower() != "nan" else [])
     if processes:
         print(f"[Compare] Process filter detected ({len(processes)}): {', '.join(processes)}")
     else:
@@ -356,7 +326,7 @@ def compare_old_new(timestamp, email):
 
     raw_impacts = str(row.get("IMPACT_PRIORITIES", "")).strip()
     if raw_impacts and raw_impacts.lower() != "nan":
-        pairs = re.findall(r"([A-Za-zäöüÄÖÜß ]+):\\s*([\\d.]+)", raw_impacts)
+        pairs = re.findall(r"([A-Za-zäöüÄÖÜß ]+):\s*([\d.]+)", raw_impacts)
         if pairs:
             print("[Compare] Impact priorities provided:", "; ".join([f"{k}: {v}" for k, v in pairs]))
     else:
@@ -369,10 +339,15 @@ def compare_old_new(timestamp, email):
     else:
         print("[Compare] No maturity level filter applied.")
 
+    problem_texts = row.get("PROBLEM_TEXTS", "").strip()
+    if problem_texts and problem_texts.lower() != "nan":
+        print("\n[Compare] Provided Problem Texts:")
+        # Print each problem separated by semicolons on a new line or all together
+        print(problem_texts)
+
     def parse_uc_scores(text):
         if not isinstance(text, str):
             return {}
-        # Normalize all non-breaking and odd spaces
         cleaned = re.sub(r"[  ]+", " ", text).replace(";", " ; ")
         pairs = re.findall(r"(UC-\d+)\s*:\s*([\d.,]+)", cleaned)
         results = {}
@@ -395,24 +370,27 @@ def compare_old_new(timestamp, email):
         new_score = new_scores.get(uc)
         data.append([uc, old_rank, new_rank, old_score, new_score])
 
-    # Load Use Case metadata for maturity lookup
+    # Load Use Case metadata for maturity and name lookup
     with open(USECASE_DB, "r", encoding="utf-8") as f:
         usecases = json.load(f)
     uc_maturity_map = {f"UC-{uc['id']}": uc.get("maturity_level", {}).get("label", {}).get("de", "") for uc in usecases}
+    uc_name_map = {f"UC-{uc['id']}": uc.get("name", {}).get("de", "") for uc in usecases}
 
     df_compare = pd.DataFrame(data, columns=["UC", "Old_Rank", "New_Rank", "Old_Score", "New_Score"])
     df_compare["Maturity_Level"] = df_compare["UC"].map(uc_maturity_map)
-    df_compare = df_compare[["UC", "Maturity_Level", "Old_Rank", "New_Rank", "Old_Score", "New_Score"]]
+    df_compare["Use_Case_Name"] = df_compare["UC"].map(uc_name_map)
+    df_compare = df_compare[["UC", "Use_Case_Name", "Maturity_Level", "Old_Rank", "New_Rank", "Old_Score", "New_Score"]]
+
     print("\n[Compare] Rank comparison:")
     print(df_compare.to_string(index=False))
 
     overlap = len(set(old_scores.keys()) & set(new_scores.keys()))
-    print(f"\n[Compare] Overlap: {overlap} / {len(old_scores)} ({overlap / max(len(old_scores), 1):.0%})")
+    denom = max(len(old_scores), 1)
+    print(f"\n[Compare] Overlap: {overlap} / {len(old_scores)} ({overlap / denom:.0%})")
     if overlap > 0:
         print(f"[Compare] ✅ {overlap} shared Use Case(s) found.")
     else:
         print("[Compare] ⚠️ No overlap between old and new matches.")
-
 
 # ---------------------------------------------------------------------
 # CLI
