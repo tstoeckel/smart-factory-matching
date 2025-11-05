@@ -342,8 +342,7 @@ def compare_old_new(timestamp, email):
     problem_texts = row.get("PROBLEM_TEXTS", "").strip()
     if problem_texts and problem_texts.lower() != "nan":
         print("\n[Compare] Provided Problem Texts:")
-        # Print each problem separated by semicolons on a new line or all together
-        print(problem_texts)
+        print(problem_texts.replace(';', ';\n'))
 
     def parse_uc_scores(text):
         if not isinstance(text, str):
