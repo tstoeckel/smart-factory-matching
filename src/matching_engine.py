@@ -170,7 +170,7 @@ def match_assessment(
         impact_weight = compute_impact_weight(uc.get("impact", []), customer_impact)
         process_weight = compute_process_spread_weight(uc, customer_processes)
 
-        final = 0.5 * base + 0.25 * impact_weight + 0.15 * maturity_weight + 0.10 * process_weight
+        final = 0.5 * base + 0.25 * impact_weight + 0.15 * maturity_weight + 0.1 * process_weight
         results.append(
             {
                 "use_case_id": uc["id"],
@@ -256,7 +256,10 @@ def run_batch_matching(recompute_all=False):
             customer_maturity_levels,
             debug=False,
         )
-        formatted = "; ".join([f"UC-{r['use_case_id']}: {r['score']}" for r in top_matches[:TOP_LIMIT]])
+        formatted = "; ".join([
+            f"UC-{r.get('use_case_id', '?')}: {r.get('score', 0):.3f}"
+            for r in top_matches[:TOP_LIMIT]
+        ])
         df.at[i, "MATCHES_SCORED"] = formatted
 
     df = compute_overlap_stats(df)
