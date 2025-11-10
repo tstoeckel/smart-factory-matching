@@ -154,23 +154,52 @@ def match_assessment(
     for uc, uc_problems in zip(usecases, uc_problem_sets):
 
         # Strict process filtering (doc-consistent)
-        if customer_processes and not any(
-            proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
-        ):
-            continue
+        #if customer_processes and not any(
+        #    proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
+        #):
+        #    continue
 
         # Strict maturity-level filtering
-        if customer_maturity_levels:
+        #if customer_maturity_levels:
+        #    uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
+        #    if not any(level.lower() in uc_level for level in customer_maturity_levels):
+        #        continue
+
+
+        # Patched combined filtering logic, // Include Use Case if it matches either process or maturity filter (not necessarily both)
+        if customer_processes and customer_maturity_levels:
+            proc_match = any(
+                proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
+            )
+            uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
+            maturity_match = any(level.lower() in uc_level for level in customer_maturity_levels)
+
+            # Use Case berücksichtigen, wenn entweder Prozess oder Maturity passt
+            if not (proc_match or maturity_match):
+                continue
+        elif customer_processes:
+            # Nur Prozessfilter prüfen
+            if not any(
+                proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
+            ):
+                continue
+        elif customer_maturity_levels:
+            # Nur Maturity-Filter prüfen
             uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
             if not any(level.lower() in uc_level for level in customer_maturity_levels):
                 continue
+
+
 
         base = sum(1 for p in problems if any(p in u for u in uc_problems)) / max(len(problems), 1)
         maturity_weight = compute_maturity_weight(uc, peer_relations, usecases, debug)
         impact_weight = compute_impact_weight(uc.get("impact", []), customer_impact)
         process_weight = compute_process_spread_weight(uc, customer_processes)
 
-        final = 0.5 * base + 0.25 * impact_weight + 0.15 * maturity_weight + 0.1 * process_weight
+
+        final = 0.5 * base + 0.3 * impact_weight + 0.15 * maturity_weight + 0.05 * process_weight
+        # Patched: previous weighting (commented out)
+        #final = 0.5 * base + 0.25 * impact_weight + 0.15 * maturity_weight + 0.1 * process_weight
         results.append(
             {
                 "use_case_id": uc["id"],
