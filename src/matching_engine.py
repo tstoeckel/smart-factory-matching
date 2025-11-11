@@ -115,7 +115,9 @@ def compute_impact_weight(uc_impact, customer_impact):
             den += v
     if den == 0:
         return 1.0
-    return max(0.1, min(1.0, num / (10 * den)))
+    #return max(0.1, min(1.0, num / (10 * den)))
+    return max(0.1, min(1.0, num / den))
+
 
 def compute_process_spread_weight(uc, customer_processes):
     """
@@ -192,12 +194,16 @@ def match_assessment(
 
 
         base = sum(1 for p in problems if any(p in u for u in uc_problems)) / max(len(problems), 1)
+        
+        # Increase weighting of base match component in final scoring formula to prioritize use cases with higher problem coverage
+        base_adj = base ** 1.5  # oder base ** 2
+
         maturity_weight = compute_maturity_weight(uc, peer_relations, usecases, debug)
         impact_weight = compute_impact_weight(uc.get("impact", []), customer_impact)
         process_weight = compute_process_spread_weight(uc, customer_processes)
 
 
-        final = 0.5 * base + 0.3 * impact_weight + 0.15 * maturity_weight + 0.05 * process_weight
+        final = 0.4 * base_adj + 0.2 * impact_weight + 0.15 * maturity_weight + 0.25 * process_weight
         # Patched: previous weighting (commented out)
         #final = 0.5 * base + 0.25 * impact_weight + 0.15 * maturity_weight + 0.1 * process_weight
         results.append(
@@ -205,7 +211,8 @@ def match_assessment(
                 "use_case_id": uc["id"],
                 "use_case_name_de": uc.get("name", {}).get("de", ""),
                 "score": round(final, 3),
-                "base": base,
+                "base_adj": base_adj,
+                #"base": base,
                 "impact": impact_weight,
                 "maturity": maturity_weight,
                 "process": process_weight,
