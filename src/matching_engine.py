@@ -115,6 +115,7 @@ def compute_impact_weight(uc_impact, customer_impact):
             den += v
     if den == 0:
         return 1.0
+    # Damit wird die Division nicht mehr durch den Faktor 10 zusätzlich skaliert, was die Werte im Bereich [0.1, 1.0] feiner verteilt und das Matching sensibler macht.
     #return max(0.1, min(1.0, num / (10 * den)))
     return max(0.1, min(1.0, num / den))
 
@@ -203,9 +204,9 @@ def match_assessment(
         process_weight = compute_process_spread_weight(uc, customer_processes)
 
 
-        final = 0.4 * base_adj + 0.2 * impact_weight + 0.15 * maturity_weight + 0.25 * process_weight
+        #final = 0.4 * base_adj + 0.2 * impact_weight + 0.15 * maturity_weight + 0.25 * process_weight
         # Patched: previous weighting (commented out)
-        #final = 0.5 * base + 0.25 * impact_weight + 0.15 * maturity_weight + 0.1 * process_weight
+        final = 0.5 * base_adj + 0.25 * impact_weight + 0.15 * maturity_weight + 0.1 * process_weight
         results.append(
             {
                 "use_case_id": uc["id"],
