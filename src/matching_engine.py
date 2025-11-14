@@ -22,7 +22,7 @@ from google.oauth2.service_account import Credentials
 
 ASSESSMENT_DB = "data/assessment_db.csv"
 USECASE_DB = "data/uc_problems_db.json"
-GOOGLE_SHEET_CREDENTIALS = "data/praxis-backup-478106-c1-44ef01b81a50.json"
+GOOGLE_SHEET_CREDENTIALS = "data/praxis-backup-478106-c1-7f3f6481cd6e.json"
 
 OVERLAP_THRESHOLD = 0.3
 MATURITY_MODE = "bottom_up"  # or 'top_down'
@@ -518,7 +518,7 @@ def aggregate_top20_usecases_with_rank(df):
 # import_from_Google sheet all new assessment data
 # ---------------------------------------------------------------------
 
-def import_from_sheet(sheet_id, ASSESSMENT_DB = "data/assessment_db.csv", GOOGLE_SHEET_CREDENTIALS = "data/praxis-backup-478106-c1-44ef01b81a50.json"):
+def import_from_sheet(sheet_id, ASSESSMENT_DB = "data/assessment_db.csv", GOOGLE_SHEET_CREDENTIALS = "data/praxis-backup-478106-c1-7f3f6481cd6e.json"):
     # Authentifizierung und Google Sheet Zugriff
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_file(GOOGLE_SHEET_CREDENTIALS, scopes=scopes)
@@ -539,6 +539,18 @@ def import_from_sheet(sheet_id, ASSESSMENT_DB = "data/assessment_db.csv", GOOGLE
     df_sheet.rename(columns=mapping, inplace=True)
     relevant = list(mapping.values())
     df_sheet = df_sheet[relevant]
+
+    # Neu: Verarbeitung von MATURITY_LEVEL, nur Text vor ":" übernehmen
+    def extract_maturity_level(value):
+        if pd.isna(value):
+            return value
+        parts = value.split(';')  # An Semikolon trennen
+        # Für jedes Segment nur den Teil vor ':' extrahieren, trimmen
+        clean_parts = [part.split(':')[0].strip() for part in parts if part.strip()]
+        return "; ".join(clean_parts)  # Teilantworten wieder zusammensetzen
+    
+    df_sheet["MATURITY_LEVELS"] = df_sheet["MATURITY_LEVELS"].apply(extract_maturity_level)
+
 
     try:
         df_csv = pd.read_csv(ASSESSMENT_DB)
