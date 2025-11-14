@@ -10,6 +10,11 @@ import pandas as pd
 import json
 import re
 import argparse
+# ---------------------------------------------------------------------
+#Import Google Sheet Data
+# ---------------------------------------------------------------------
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -17,6 +22,7 @@ import argparse
 
 ASSESSMENT_DB = "data/assessment_db.csv"
 USECASE_DB = "data/uc_problems_db.json"
+GOOGLE_SHEET_CREDENTIALS = "data/praxis-backup-478106-c1-44ef01b81a50.json"
 
 OVERLAP_THRESHOLD = 0.3
 MATURITY_MODE = "bottom_up"  # or 'top_down'
@@ -508,6 +514,51 @@ def aggregate_top20_usecases_with_rank(df):
     for _, row in df_top20_old.iterrows():
         print(f" {row['UC']:<7} {row['Use_Case_Name'][:39]:<40} {row['Maturity_Level'][:19]:<20} {row['Old_Rank']:<8} {row['New_Rank']:<8} {row['Old_Count']:<10} {row['New_Count']:<10} {row['Old_Score']:<10.3f} {row['New_Score']:<10.3f}")
 
+# ---------------------------------------------------------------------
+# import_from_Google sheet all new assessment data
+# ---------------------------------------------------------------------
+
+def import_from_sheet(sheet_id, ASSESSMENT_DB = "data/assessment_db.csv", GOOGLE_SHEET_CREDENTIALS = "data/praxis-backup-478106-c1-44ef01b81a50.json"):
+    # Authentifizierung und Google Sheet Zugriff
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(GOOGLE_SHEET_CREDENTIALS, scopes=scopes)
+    client = gspread.authorize(creds)
+    
+    worksheet = client.open_by_key(sheet_id).worksheet("Master")
+    data = worksheet.get_all_records()  # Daten ab Zeile 2 als Dicts
+    df_sheet = pd.DataFrame(data)
+
+    mapping = {
+        "Zeitstempel": "CREATED_AT",
+        "E-Mail-Adresse": "EMAIL",
+        "Q2_2 In diesen Prozessschritten suchen wir nach Use Cases:": "PROCESSES",
+        "Q2_3 Folgende Problemstellung möchten wir lösen:": "PROBLEM_TEXTS",
+        "Q2_5 Auf diesem Reifegrad / Entwicklungsstufen suchen wir Use Cases:": "MATURITY_LEVELS",
+        "Q2_6 Folgende strategische Prioritäten wollen wir mit dem Use Case verfolgen:Pro Kategorie bitte nur eine Option auswählen.": "IMPACT_PRIORITIES"
+    }
+    df_sheet.rename(columns=mapping, inplace=True)
+    relevant = list(mapping.values())
+    df_sheet = df_sheet[relevant]
+
+    try:
+        df_csv = pd.read_csv(ASSESSMENT_DB)
+    except FileNotFoundError:
+        df_csv = pd.DataFrame(columns=relevant)
+
+    df_sheet['key'] = df_sheet['CREATED_AT'].astype(str) + '-' + df_sheet['EMAIL'].astype(str)
+    if not df_csv.empty:
+        df_csv['key'] = df_csv['CREATED_AT'].astype(str) + '-' + df_csv['EMAIL'].astype(str)
+        new_rows = df_sheet[~df_sheet['key'].isin(df_csv['key'])]
+    else:
+        new_rows = df_sheet.copy()
+
+    if not new_rows.empty:
+        df_csv = pd.concat([df_csv, new_rows[relevant]], ignore_index=True)
+        df_csv.drop(columns=['key'], errors='ignore', inplace=True)
+        df_csv.to_csv(ASSESSMENT_DB, index=False)
+        print(f"{len(new_rows)} new line(s) added.")
+    else:
+        print("no new lines in Google Sheet identified.")
 
 # ---------------------------------------------------------------------
 # CLI
@@ -523,9 +574,13 @@ if __name__ == "__main__":
         "--compare", nargs=2, metavar=("TIMESTAMP", "EMAIL"), help="Compare old vs new results for one assessment."
     )
     parser.add_argument("--aggregate-top20", action="store_true", help="Aggregate and display top 20 use cases over all assessments")
+    parser.add_argument("--import-sheet", action="store_true", help="Import new data from Google Sheet into assessment_db.csv")
     args = parser.parse_args()
-
-    if args.inspect:
+    
+    if args.import_sheet:
+        SHEET_ID = "1RdIX9cIavqQXR2XPvW7LtlfgiR247Kvfuc8ip-cVmuw"  # Replace with your actual Google Sheet ID
+        import_from_sheet(SHEET_ID, ASSESSMENT_DB, GOOGLE_SHEET_CREDENTIALS)
+    elif args.inspect:
         ts, em = args.inspect
         inspect_single_assessment(ts, em)
     elif args.compare:
