@@ -645,10 +645,8 @@ def export_to_report_csv(
     sheet_columns = ws.row_values(1)  # Gets header names in order
     sheet_records = ws.get_all_records()
     existing_keys = set(
-        (str(row.get('CREATED_AT','')).strip(),
-         str(row.get('EMAIL_ADRESSE_P2','')).strip(),
-         str(row.get('FIRSTNAME_P1','')).strip())
-        for row in sheet_records)
+    (str(row.get('CREATED_AT','')).strip(), str(row.get('EMAIL_ADRESSE_P2','')).strip())
+    for row in sheet_records)
 
     # Read local assessment DB
     df = pd.read_csv(csv_path)
@@ -675,11 +673,11 @@ def export_to_report_csv(
             score = m.group(2)     # Score as string, e.g., '0.500'
             uc_key = f"UC{num:02d}"
             uc_info = usecase_db.get(uc_key, {"de": "Unknown", "en": "Unknown"})
-            key = (created_at, email, uc_info["en"])
+            key = (created_at, email)
             if key in existing_keys:
                 continue  # Skip if already present
             # Format for Sheet column Y: 'UCxx : NameInDeutsch' (space-colon-space)
-            name_y = f"UC{num:02d} : {uc_info['de']}"
+            name_y = f"UC{num:02d}: {uc_info['de']}"
             # Build row for Google Sheet using only the existing columns
             row_dict = {
                 'CREATED_AT': created_at,              # Sheet col A
