@@ -100,6 +100,29 @@ def load_usecase_db(json_path):
         }
     return lut
 
+def parse_gsheet_datetime(val):
+    if pd.isna(val):
+        return val
+    # Versuche, ISO-Format oder andere gängige Formate zu parsen
+    try:
+        return pd.to_datetime(val).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    # Handle Google Sheet Seriennummer (numerischer Wert)
+    try:
+        base = datetime.datetime(1899, 12, 30)
+        n = float(val)
+        dt = base + datetime.timedelta(days=n)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    # Erwartetes deutsches Datumsformat (z.B. '22.10.2025 09:05:47')
+    try:
+        return datetime.datetime.strptime(str(val), "%d.%m.%Y %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    # Fallback: Originalwert zurückgeben
+    return val
 
 # ---------------------------------------------------------------------
 # Core scoring components
@@ -557,6 +580,8 @@ def import_from_sheet(sheet_id, ASSESSMENT_DB = "data/assessment_db.csv", GOOGLE
     df_sheet.rename(columns=mapping, inplace=True)
     relevant = list(mapping.values())
     df_sheet = df_sheet[relevant]
+    df_sheet['CREATED_AT'] = df_sheet['CREATED_AT'].apply(parse_gsheet_datetime)
+
 
     # Neu: Verarbeitung von MATURITY_LEVEL, nur Text vor ":" übernehmen
     def extract_maturity_level(value):
