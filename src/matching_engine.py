@@ -83,6 +83,24 @@ def build_peer_relations(usecases, overlap_threshold=0.3):
         peer_relations[i] = peers
     return peer_relations, uc_problem_sets
 
+def load_usecase_db(json_path):
+    """
+    Load the use case DB (JSON). Expects a list of dicts, each with 'id', 'name'{'de','en'}.
+    Returns a mapping: key 'UCxx' → { 'de': ..., 'en': ... }
+    """
+    with open(json_path, encoding="utf-8") as f:
+        raw = json.load(f)
+    lut = {}
+    for entry in raw:
+        ucid = int(entry['id'])  # numeric value, e.g. 16
+        key = f"UC{ucid:02d}"    # two-digit (e.g. UC16)
+        lut[key] = {
+            "de": entry['name']['de'],
+            "en": entry['name']['en']
+        }
+    return lut
+
+
 # ---------------------------------------------------------------------
 # Core scoring components
 # ---------------------------------------------------------------------
@@ -572,6 +590,91 @@ def import_from_sheet(sheet_id, ASSESSMENT_DB = "data/assessment_db.csv", GOOGLE
     else:
         print("no new lines in Google Sheet identified.")
 
+
+# ---------------------------------------------------------------------
+# Export Matchings to Google Sheet
+# ---------------------------------------------------------------------
+def export_to_report_csv(
+    csv_path,
+    uc_json_path,
+    sheet_id,
+    creds_path,
+    worksheet_name
+):
+    """
+    For each row in the assessment CSV, parses matches in the 'MATCHES_SCORED' column,
+    extracts UC number and score, looks up German/English names in UC DB,
+    and writes up to 10 new rows into the target Google Sheet (if not already present).
+    Only existing columns in the Google Sheet are updated (no new columns created).
+    Duplicate checks are based on CREATED_AT, EMAIL, UC English name.
+    """
+    # Load use case data from JSON
+    usecase_db = load_usecase_db(uc_json_path)
+    # Authenticate and access the Google Sheet (worksheet)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+    client = gspread.authorize(creds)
+    ws = client.open_by_key(sheet_id).worksheet(worksheet_name)
+
+    # Retrieve existing rows and headers for duplicate and column position checks
+    sheet_columns = ws.row_values(1)  # Gets header names in order
+    sheet_records = ws.get_all_records()
+    existing_keys = set(
+        (str(row.get('CREATED_AT','')).strip(),
+         str(row.get('EMAIL_ADRESSE_P2','')).strip(),
+         str(row.get('FIRSTNAME_P1','')).strip())
+        for row in sheet_records)
+
+    # Read local assessment DB
+    df = pd.read_csv(csv_path)
+    for idx, row in df.iterrows():
+        created_at = str(row['CREATED_AT'])
+        email = str(row['EMAIL'])
+        processes = row.get('PROCESSES', '')
+        problem_texts = row.get('PROBLEM_TEXTS', '')
+        maturity_level = row.get('MATURITY_LEVEL', '')
+        impact_priorities = row.get('IMPACT_PRIORITIES', '')
+
+        # Parse up to 10 matches from MATCHES_SCORED (format: 'UC-16: 0.500; ...')
+        matches_scored_raw = str(row.get('MATCHES_SCORED',''))
+        if not matches_scored_raw:
+            continue  # Skip empty rows
+        match_entries = [s.strip() for s in matches_scored_raw.split(';') if s.strip()]
+
+        for entry in match_entries[:10]:
+            # Extract use case number and score using regex
+            m = re.match(r"UC-?(\d+):\s*([\d.]+)", entry)
+            if not m:
+                continue
+            num = int(m.group(1))  # UC number (integer, e.g., 16)
+            score = m.group(2)     # Score as string, e.g., '0.500'
+            uc_key = f"UC{num:02d}"
+            uc_info = usecase_db.get(uc_key, {"de": "Unknown", "en": "Unknown"})
+            key = (created_at, email, uc_info["en"])
+            if key in existing_keys:
+                continue  # Skip if already present
+            # Format for Sheet column Y: 'UCxx : NameInDeutsch' (space-colon-space)
+            name_y = f"UC{num:02d} : {uc_info['de']}"
+            # Build row for Google Sheet using only the existing columns
+            row_dict = {
+                'CREATED_AT': created_at,              # Sheet col A
+                'SCORE': score,                        # Sheet col D
+                'FIRSTNAME_P1': uc_info["en"],        # Sheet col G
+                'EMAIL_ADRESSE_P2': email,             # Sheet col H
+                'Q1_0 Use Case Name:': name_y,         # Sheet col Y
+                'Q2_2 In diesen Prozessschritten suchen wir nach Use Cases:': processes,  # Sheet col AP
+                'Q2_3 Folgende Problemstellung möchten wir lösen:': problem_texts,        # Sheet col AQ
+                'Q2_5 Auf diesem Reifegrad / Entwicklungsstufen suchen wir Use Cases:': maturity_level, # Sheet col AS
+                'Q2_6 Folgende strategische Prioritäten wollen wir mit dem Use Case verfolgen:Pro Kategorie bitte nur eine Option auswählen.': impact_priorities # Sheet col AT
+            }
+            # Create the row in correct sheet-column order (others blank)
+            values_for_insert = [row_dict.get(col, '') for col in sheet_columns]
+            ws.append_row(values_for_insert)
+            existing_keys.add(key)  # Prevent duplicates
+    print("Export finished. Only existing columns were updated.")
+
+
+
 # ---------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------
@@ -587,11 +690,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("--aggregate-top20", action="store_true", help="Aggregate and display top 20 use cases over all assessments")
     parser.add_argument("--import-sheet", action="store_true", help="Import new data from Google Sheet into assessment_db.csv")
+    parser.add_argument('--export-to-report', action='store_true', help='Export entire assessment DB to Google Sheet report (max 10 rows per assessment).')
     args = parser.parse_args()
     
     if args.import_sheet:
         SHEET_ID = "1RdIX9cIavqQXR2XPvW7LtlfgiR247Kvfuc8ip-cVmuw"  # Replace with your actual Google Sheet ID
         import_from_sheet(SHEET_ID, ASSESSMENT_DB, GOOGLE_SHEET_CREDENTIALS)
+    
+    elif args.export_to_report:
+        export_to_report_csv(
+            csv_path="data/assessment_db.csv",       
+            uc_json_path="data/uc_problems_db.json", 
+            sheet_id="1t5nQkdwaw-NZl2Abupu5gV2tE546ObEkWtHqFY-BwXw",         
+            creds_path="data/praxis-backup-478106-c1-7f3f6481cd6e.json",
+            worksheet_name="Worksheet") 
+   
     elif args.inspect:
         ts, em = args.inspect
         inspect_single_assessment(ts, em)
