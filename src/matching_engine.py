@@ -11,12 +11,16 @@ import pandas as pd
 import json
 import re
 import argparse
+import time
+import sys
+import math
+
+
 # ---------------------------------------------------------------------
 #Import Google Sheet Data
 # ---------------------------------------------------------------------
 import gspread
 from google.oauth2.service_account import Credentials
-
 from dateutil import parser
 
 def to_datetime_safe(s):
@@ -220,7 +224,7 @@ def match_assessment(
 
         # Strict maturity-level filtering
         #if customer_maturity_levels:
-        #    uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
+        #    uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "")
         #    if not any(level.lower() in uc_level for level in customer_maturity_levels):
         #        continue
 
@@ -635,23 +639,8 @@ def export_to_report_csv(
     creds_path,
     worksheet_name
 ):
-    """
-    For each row in the assessment CSV, parses matches in the 'MATCHES_SCORED' column,
-    extracts UC number and score, looks up German/English names in UC DB,
-    and writes up to 10 new rows into the target Google Sheet.
-
-    IMPORTANT LOGIC:
-    - Duplicate check is based on (CREATED_AT, EMAIL) only.
-    - If ANY row with the same (CREATED_AT, EMAIL) already exists in the Google Sheet,
-      the current CSV row is skipped entirely (no new rows written for that row).
-    - If NO such row exists, ALL use cases from MATCHES_SCORED (max 10 entries) are written
-      as individual rows to the Google Sheet.
-    - Only existing columns in the Google Sheet are updated (no new columns created).
-    """
-    # 1) Load use case database
     usecase_db = load_usecase_db(uc_json_path)
 
-    # 2) Connect to Google Sheet
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -660,38 +649,35 @@ def export_to_report_csv(
     client = gspread.authorize(creds)
     ws = client.open_by_key(sheet_id).worksheet(worksheet_name)
 
-    # 3) Read existing sheet content
-    sheet_columns = ws.row_values(1)           # header row: column names in order
-    sheet_records = ws.get_all_records()       # all rows as dicts
+    sheet_columns = ws.row_values(1)
+    sheet_records = ws.get_all_records()
 
-    # Build a set of (datetime, email) for quick duplicate checking
+    # Use vollständigen CREATED_AT (mit Zeit) statt nur Datum
     existing_keys = set(
-        (to_datetime_safe(row.get("CREATED_AT", "")), str(row.get("EMAIL_ADRESSE_P2", "")).strip())
+        (
+            str(row.get("CREATED_AT", "")).strip(),
+            str(row.get("EMAIL_ADRESSE_P2", "")).strip()
+        )
         for row in sheet_records
     )
 
-    # 4) Read local assessment DB
     df = pd.read_csv(csv_path)
 
-    # 5) Process each row of the assessment DB
     for idx, row in df.iterrows():
-        created_at_raw = row["CREATED_AT"]
+        created_at_raw = str(row["CREATED_AT"]).strip()
         email = str(row["EMAIL"]).strip()
 
-        # Parse datetime for comparison
-        dt_created_at = to_datetime_safe(created_at_raw)
-        key = (dt_created_at, email)
+        # Verwende den vollständigen Timestamp als Key
+        key = (created_at_raw, email)
 
-        # If any row with this timestamp+email already exists: skip whole CSV row
         if key in existing_keys:
             continue
 
         processes = row.get("PROCESSES", "")
         problem_texts = row.get("PROBLEM_TEXTS", "")
-        maturity_level = row.get("MATURITY_LEVEL", "")
+        maturity_level = row.get("MATURITY_LEVELS", "")
         impact_priorities = row.get("IMPACT_PRIORITIES", "")
 
-        # Parse all up to 10 matches in MATCHES_SCORED (e.g. 'UC-16: 0.500; UC-05: 0.350; ...')
         matches_scored_raw = str(row.get("MATCHES_SCORED", ""))
         if not matches_scored_raw:
             continue
@@ -700,24 +686,19 @@ def export_to_report_csv(
         if not match_entries:
             continue
 
-        # 6) For this CSV row, we now know that no entry with (CREATED_AT, EMAIL) exists.
-        #    So we write ALL use cases from MATCHES_SCORED (max 10).
         for entry in match_entries[:10]:
-            # Extract UC number and score using regex: 'UC-16: 0.500'
             m = re.match(r"UC-?(\d+):\s*([\d.]+)", entry)
             if not m:
                 continue
 
-            num = int(m.group(1))   # e.g. 16
-            score = m.group(2)      # e.g. '0.500'
+            num = int(m.group(1))
+            score = m.group(2)
 
             uc_key = f"UC{num:02d}"
             uc_info = usecase_db.get(uc_key, {"de": "Unknown", "en": "Unknown"})
 
-            # String for Sheet column Y: 'UCxx: Deutscher Name'
             name_y = f"UC{num:02d}: {uc_info['de']}"
 
-            # Build row dict using only existing sheet columns
             row_dict = {
                 "CREATED_AT": created_at_raw,
                 "SCORE": score,
@@ -730,17 +711,135 @@ def export_to_report_csv(
                 "Q2_6 Folgende strategische Prioritäten wollen wir mit dem Use Case verfolgen:Pro Kategorie bitte nur eine Option auswählen.": impact_priorities,
             }
 
-            values_for_insert = [row_dict.get(col, "") for col in sheet_columns]
+            values_for_insert = []
+            for col in sheet_columns:
+                val = row_dict.get(col, "")
+                if val is None or (isinstance(val, float) and math.isnan(val)):
+                    val = ""
+                values_for_insert.append(val)
+            
             ws.append_row(values_for_insert)
 
-        # After writing ALL use cases for this (CREATED_AT, EMAIL),
-        # mark this combination as existing so future rows with the same key will be skipped.
         existing_keys.add(key)
 
     print("Export finished. Only existing columns were updated.")
 
+# ---------------------------------------------------------------------
+#  Export assessment_db.csv to Google Sheet in batches to avoid API quotas
+# ---------------------------------------------------------------------
+def export_to_report_in_batches(
+    csv_path,
+    uc_json_path,
+    sheet_id,
+    creds_path,
+    worksheet_name,
+    batch_size=50,
+    start_idx=0,
+    delay_between_batches=60
+):
+    """
+    Export assessment_db.csv to Google Sheet in batches to avoid API quotas.
+    Processes batch_size rows starting at start_idx.
+    Returns next start index, or None if done.
+    """
 
+    usecase_db = load_usecase_db(uc_json_path)
 
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+    client = gspread.authorize(creds)
+    ws = client.open_by_key(sheet_id).worksheet(worksheet_name)
+
+    sheet_columns = ws.row_values(1)
+    sheet_records = ws.get_all_records()
+    
+    # Use vollständigen CREATED_AT (mit Zeit) statt nur Datum
+    existing_keys = set(
+        (
+            str(row.get("CREATED_AT", "")).strip(),
+            str(row.get("EMAIL_ADRESSE_P2", "")).strip()
+        )
+        for row in sheet_records
+    )
+
+    df = pd.read_csv(csv_path)
+    total_rows = len(df)
+    if start_idx >= total_rows:
+        print("All rows processed.")
+        return None
+
+    end_idx = min(start_idx + batch_size, total_rows)
+    batch_df = df.iloc[start_idx:end_idx]
+
+    new_rows_count = 0
+
+    for idx, row in batch_df.iterrows():
+        created_at_raw = str(row["CREATED_AT"]).strip()
+        email = str(row["EMAIL"]).strip()
+        
+        # Verwende den vollständigen Timestamp als Key
+        key = (created_at_raw, email)
+
+        if key in existing_keys:
+            continue
+
+        matches_scored_raw = str(row.get("MATCHES_SCORED", ""))
+        if not matches_scored_raw:
+            continue
+
+        match_entries = [s.strip() for s in matches_scored_raw.split(";") if s.strip()]
+        if not match_entries:
+            continue
+
+        processes = row.get("PROCESSES", "")
+        problem_texts = row.get("PROBLEM_TEXTS", "")
+        maturity_level = row.get("MATURITY_LEVELS", "")
+        impact_priorities = row.get("IMPACT_PRIORITIES", "")
+
+        for entry in match_entries[:10]:
+            m = re.match(r"UC-?(\d+):\s*([\d.]+)", entry)
+            if not m:
+                continue
+            num = int(m.group(1))
+            score = m.group(2)
+            uc_key = f"UC{num:02d}"
+            uc_info = usecase_db.get(uc_key, {"de": "Unknown", "en": "Unknown"})
+            name_y = f"{uc_key}: {uc_info['de']}"
+
+            row_dict = {
+                "CREATED_AT": created_at_raw,
+                "SCORE": score,
+                "FIRSTNAME_P1": uc_info["en"],
+                "EMAIL_ADRESSE_P2": email,
+                "Q1_0 Use Case Name:": name_y,
+                "Q2_2 In diesen Prozessschritten suchen wir nach Use Cases:": processes,
+                "Q2_3 Folgende Problemstellung möchten wir lösen:": problem_texts,
+                "Q2_5 Auf diesem Reifegrad / Entwicklungsstufen suchen wir Use Cases:": maturity_level,
+                "Q2_6 Folgende strategische Prioritäten wollen wir mit dem Use Case verfolgen:Pro Kategorie bitte nur eine Option auswählen.": impact_priorities,
+            }
+
+            values_for_insert = []
+            for col in sheet_columns:
+                val = row_dict.get(col, "")
+                if isinstance(val, float) and math.isnan(val):
+                    val = ""
+                values_for_insert.append(val)
+
+            # Hier wird tatsächlich in Google Sheet geschrieben
+            ws.append_row(values_for_insert)
+
+        existing_keys.add(key)
+        new_rows_count += 1
+
+    print(f"[Batch] Exported {new_rows_count} new row(s) (rows {start_idx}-{end_idx}).")
+    
+    # Return next index if there are more rows to process
+    if end_idx < total_rows:
+        return end_idx
+    return None
 # ---------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------
@@ -757,6 +856,13 @@ if __name__ == "__main__":
     parser.add_argument("--aggregate-top20", action="store_true", help="Aggregate and display top 20 use cases over all assessments")
     parser.add_argument("--import-sheet", action="store_true", help="Import new data from Google Sheet into assessment_db.csv")
     parser.add_argument('--export-to-report', action='store_true', help='Export entire assessment DB to Google Sheet report (max 10 rows per assessment).')
+    
+    parser.add_argument("--export-in-batches", action="store_true", help="Export assessment DB to Google Sheet in batches to avoid API quota limits.")
+    parser.add_argument("--batch-size", type=int, default=50, help="Number of rows to process per batch (default: 50).")
+    parser.add_argument("--start-idx", type=int, default=0, help="Start index to process from (default: 0).")
+    parser.add_argument("--batch-delay", type=int, default=60, help="Delay in seconds between batch uploads (default: 60).")
+    
+    
     args = parser.parse_args()
     
     if args.import_sheet:
@@ -771,6 +877,26 @@ if __name__ == "__main__":
             creds_path="data/praxis-backup-478106-c1-7f3f6481cd6e.json",
             worksheet_name="Worksheet") 
    
+
+    elif args.export_in_batches:
+            next_idx = args.start_idx
+            while next_idx is not None:
+                print(f"Starting batch export from row {next_idx}")
+                next_idx = export_to_report_in_batches(
+                    csv_path=ASSESSMENT_DB,
+                    uc_json_path=USECASE_DB,
+                    sheet_id="1t5nQkdwaw-NZl2Abupu5gV2tE546ObEkWtHqFY-BwXw",
+                    creds_path=GOOGLE_SHEET_CREDENTIALS,
+                    worksheet_name="Worksheet",
+                    batch_size=args.batch_size,
+                    start_idx=next_idx,
+                    delay_between_batches=args.batch_delay
+                )
+                if next_idx is not None:
+                    print(f"Waiting {args.batch_delay} seconds before next batch...")
+            print("Batch export completed.")
+
+
     elif args.inspect:
         ts, em = args.inspect
         inspect_single_assessment(ts, em)
