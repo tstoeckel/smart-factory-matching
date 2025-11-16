@@ -6,6 +6,7 @@ impact priorities, maturity levels, and process filters. It also provides batch 
 overlap analysis, single-inspect, and old-vs-new comparison with UC names.
 """
 
+import datetime
 import pandas as pd
 import json
 import re
@@ -15,6 +16,14 @@ import argparse
 # ---------------------------------------------------------------------
 import gspread
 from google.oauth2.service_account import Credentials
+
+from dateutil import parser
+
+def to_datetime_safe(s):
+    try:
+        return parser.parse(str(s).strip())
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -629,71 +638,105 @@ def export_to_report_csv(
     """
     For each row in the assessment CSV, parses matches in the 'MATCHES_SCORED' column,
     extracts UC number and score, looks up German/English names in UC DB,
-    and writes up to 10 new rows into the target Google Sheet (if not already present).
-    Only existing columns in the Google Sheet are updated (no new columns created).
-    Duplicate checks are based on CREATED_AT, EMAIL, UC English name.
+    and writes up to 10 new rows into the target Google Sheet.
+
+    IMPORTANT LOGIC:
+    - Duplicate check is based on (CREATED_AT, EMAIL) only.
+    - If ANY row with the same (CREATED_AT, EMAIL) already exists in the Google Sheet,
+      the current CSV row is skipped entirely (no new rows written for that row).
+    - If NO such row exists, ALL use cases from MATCHES_SCORED (max 10 entries) are written
+      as individual rows to the Google Sheet.
+    - Only existing columns in the Google Sheet are updated (no new columns created).
     """
-    # Load use case data from JSON
+    # 1) Load use case database
     usecase_db = load_usecase_db(uc_json_path)
-    # Authenticate and access the Google Sheet (worksheet)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+
+    # 2) Connect to Google Sheet
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
     creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
     client = gspread.authorize(creds)
     ws = client.open_by_key(sheet_id).worksheet(worksheet_name)
 
-    # Retrieve existing rows and headers for duplicate and column position checks
-    sheet_columns = ws.row_values(1)  # Gets header names in order
-    sheet_records = ws.get_all_records()
+    # 3) Read existing sheet content
+    sheet_columns = ws.row_values(1)           # header row: column names in order
+    sheet_records = ws.get_all_records()       # all rows as dicts
+
+    # Build a set of (datetime, email) for quick duplicate checking
     existing_keys = set(
-    (str(row.get('CREATED_AT','')).strip(), str(row.get('EMAIL_ADRESSE_P2','')).strip())
-    for row in sheet_records)
+        (to_datetime_safe(row.get("CREATED_AT", "")), str(row.get("EMAIL_ADRESSE_P2", "")).strip())
+        for row in sheet_records
+    )
 
-    # Read local assessment DB
+    # 4) Read local assessment DB
     df = pd.read_csv(csv_path)
+
+    # 5) Process each row of the assessment DB
     for idx, row in df.iterrows():
-        created_at = str(row['CREATED_AT'])
-        email = str(row['EMAIL'])
-        processes = row.get('PROCESSES', '')
-        problem_texts = row.get('PROBLEM_TEXTS', '')
-        maturity_level = row.get('MATURITY_LEVEL', '')
-        impact_priorities = row.get('IMPACT_PRIORITIES', '')
+        created_at_raw = row["CREATED_AT"]
+        email = str(row["EMAIL"]).strip()
 
-        # Parse up to 10 matches from MATCHES_SCORED (format: 'UC-16: 0.500; ...')
-        matches_scored_raw = str(row.get('MATCHES_SCORED',''))
+        # Parse datetime for comparison
+        dt_created_at = to_datetime_safe(created_at_raw)
+        key = (dt_created_at, email)
+
+        # If any row with this timestamp+email already exists: skip whole CSV row
+        if key in existing_keys:
+            continue
+
+        processes = row.get("PROCESSES", "")
+        problem_texts = row.get("PROBLEM_TEXTS", "")
+        maturity_level = row.get("MATURITY_LEVEL", "")
+        impact_priorities = row.get("IMPACT_PRIORITIES", "")
+
+        # Parse all up to 10 matches in MATCHES_SCORED (e.g. 'UC-16: 0.500; UC-05: 0.350; ...')
+        matches_scored_raw = str(row.get("MATCHES_SCORED", ""))
         if not matches_scored_raw:
-            continue  # Skip empty rows
-        match_entries = [s.strip() for s in matches_scored_raw.split(';') if s.strip()]
+            continue
 
+        match_entries = [s.strip() for s in matches_scored_raw.split(";") if s.strip()]
+        if not match_entries:
+            continue
+
+        # 6) For this CSV row, we now know that no entry with (CREATED_AT, EMAIL) exists.
+        #    So we write ALL use cases from MATCHES_SCORED (max 10).
         for entry in match_entries[:10]:
-            # Extract use case number and score using regex
+            # Extract UC number and score using regex: 'UC-16: 0.500'
             m = re.match(r"UC-?(\d+):\s*([\d.]+)", entry)
             if not m:
                 continue
-            num = int(m.group(1))  # UC number (integer, e.g., 16)
-            score = m.group(2)     # Score as string, e.g., '0.500'
+
+            num = int(m.group(1))   # e.g. 16
+            score = m.group(2)      # e.g. '0.500'
+
             uc_key = f"UC{num:02d}"
             uc_info = usecase_db.get(uc_key, {"de": "Unknown", "en": "Unknown"})
-            key = (created_at, email)
-            if key in existing_keys:
-                continue  # Skip if already present
-            # Format for Sheet column Y: 'UCxx : NameInDeutsch' (space-colon-space)
+
+            # String for Sheet column Y: 'UCxx: Deutscher Name'
             name_y = f"UC{num:02d}: {uc_info['de']}"
-            # Build row for Google Sheet using only the existing columns
+
+            # Build row dict using only existing sheet columns
             row_dict = {
-                'CREATED_AT': created_at,              # Sheet col A
-                'SCORE': score,                        # Sheet col D
-                'FIRSTNAME_P1': uc_info["en"],        # Sheet col G
-                'EMAIL_ADRESSE_P2': email,             # Sheet col H
-                'Q1_0 Use Case Name:': name_y,         # Sheet col Y
-                'Q2_2 In diesen Prozessschritten suchen wir nach Use Cases:': processes,  # Sheet col AP
-                'Q2_3 Folgende Problemstellung möchten wir lösen:': problem_texts,        # Sheet col AQ
-                'Q2_5 Auf diesem Reifegrad / Entwicklungsstufen suchen wir Use Cases:': maturity_level, # Sheet col AS
-                'Q2_6 Folgende strategische Prioritäten wollen wir mit dem Use Case verfolgen:Pro Kategorie bitte nur eine Option auswählen.': impact_priorities # Sheet col AT
+                "CREATED_AT": created_at_raw,
+                "SCORE": score,
+                "FIRSTNAME_P1": uc_info["en"],
+                "EMAIL_ADRESSE_P2": email,
+                "Q1_0 Use Case Name:": name_y,
+                "Q2_2 In diesen Prozessschritten suchen wir nach Use Cases:": processes,
+                "Q2_3 Folgende Problemstellung möchten wir lösen:": problem_texts,
+                "Q2_5 Auf diesem Reifegrad / Entwicklungsstufen suchen wir Use Cases:": maturity_level,
+                "Q2_6 Folgende strategische Prioritäten wollen wir mit dem Use Case verfolgen:Pro Kategorie bitte nur eine Option auswählen.": impact_priorities,
             }
-            # Create the row in correct sheet-column order (others blank)
-            values_for_insert = [row_dict.get(col, '') for col in sheet_columns]
+
+            values_for_insert = [row_dict.get(col, "") for col in sheet_columns]
             ws.append_row(values_for_insert)
-            existing_keys.add(key)  # Prevent duplicates
+
+        # After writing ALL use cases for this (CREATED_AT, EMAIL),
+        # mark this combination as existing so future rows with the same key will be skipped.
+        existing_keys.add(key)
+
     print("Export finished. Only existing columns were updated.")
 
 
