@@ -178,6 +178,8 @@ def compute_impact_weight(uc_impact, customer_impact):
     # Damit wird die Division nicht mehr durch den Faktor 10 zusätzlich skaliert, was die Werte im Bereich [0.1, 1.0] feiner verteilt und das Matching sensibler macht.
     #return max(0.1, min(1.0, num / (10 * den)))
     return max(0.1, min(1.0, num / den))
+    #return max(0.1, min(1.0, (num / den) ** 1.5))  # War 1.2
+
 
 
 def compute_process_spread_weight(uc, customer_processes):
@@ -200,6 +202,54 @@ def compute_process_spread_weight(uc, customer_processes):
     return 1.0 if overlap else 0.8
 
 # ---------------------------------------------------------------------
+# Fuzzy Matching Helper Functions (NO EXTERNAL DEPENDENCIES)
+# ---------------------------------------------------------------------
+
+def levenshtein_distance(s1, s2):
+    """Berechnet Edit-Distance zwischen zwei Strings"""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+def string_similarity(s1, s2):
+    """Berechnet Ähnlichkeit 0-1 basierend auf Levenshtein-Distance"""
+    max_len = max(len(s1), len(s2))
+    if max_len == 0:
+        return 1.0
+    distance = levenshtein_distance(s1.lower(), s2.lower())
+    return 1 - (distance / max_len)
+
+def problem_matches_optimized(problem, uc_problem, token_low=0.3, token_high=0.7, sim_thresh=0.62):
+    p = problem.lower().strip()
+    u = uc_problem.lower().strip()
+    if not p or not u:
+        return False
+    if p in u or u in p:
+        return True
+    p_words = set(p.split())
+    u_words = set(u.split())
+    if not p_words or not u_words:
+        return False
+    overlap = len(p_words & u_words) / max(len(p_words), len(u_words))
+    if overlap >= token_high:
+        return True
+    if overlap < token_low:
+        return False
+    # only now expensive similarity
+    return string_similarity(p, u) >= sim_thresh
+
+# ---------------------------------------------------------------------
 # Matching logic
 # ---------------------------------------------------------------------
 
@@ -214,22 +264,10 @@ def match_assessment(
     debug=False,
 ):
     results = []
-    for uc, uc_problems in zip(usecases, uc_problem_sets):
+    uc_problem_lists = [[s.lower().strip() for s in probs if s and str(s).strip()] for probs in uc_problem_sets]
+    for uc, uc_problems in zip(usecases, uc_problem_lists):
 
-        # Strict process filtering (doc-consistent)
-        #if customer_processes and not any(
-        #    proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
-        #):
-        #    continue
-
-        # Strict maturity-level filtering
-        #if customer_maturity_levels:
-        #    uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "")
-        #    if not any(level.lower() in uc_level for level in customer_maturity_levels):
-        #        continue
-
-
-        # Patched combined filtering logic, // Include Use Case if it matches either process or maturity filter (not necessarily both)
+        # Patched combined filtering logic
         if customer_processes and customer_maturity_levels:
             proc_match = any(
                 proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
@@ -237,43 +275,41 @@ def match_assessment(
             uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
             maturity_match = any(level.lower() in uc_level for level in customer_maturity_levels)
 
-            # Use Case berücksichtigen, wenn entweder Prozess oder Maturity passt
             if not (proc_match or maturity_match):
                 continue
         elif customer_processes:
-            # Nur Prozessfilter prüfen
             if not any(
                 proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
             ):
                 continue
         elif customer_maturity_levels:
-            # Nur Maturity-Filter prüfen
             uc_level = uc.get("maturity_level", {}).get("label", {}).get("de", "").lower()
             if not any(level.lower() in uc_level for level in customer_maturity_levels):
                 continue
 
+        # FUZZY MATCHING statt exaktes Substring-Matching
+        matched_count = 0
+        for p in problems:
+            for u in uc_problems:
+                if problem_matches_optimized(p, u):
+                    matched_count += 1
+                    break
 
-
-        base = sum(1 for p in problems if any(p in u for u in uc_problems)) / max(len(problems), 1)
-        
-        # Increase weighting of base match component in final scoring formula to prioritize use cases with higher problem coverage
-        base_adj = base ** 1.5  # oder base ** 2
+        base = matched_count / max(len(problems), 1)
+        base_adj = base
 
         maturity_weight = compute_maturity_weight(uc, peer_relations, usecases, debug)
         impact_weight = compute_impact_weight(uc.get("impact", []), customer_impact)
         process_weight = compute_process_spread_weight(uc, customer_processes)
 
+        final = 0.60 * base_adj + 0.25 * impact_weight + 0.10 * maturity_weight + 0.05 * process_weight
 
-        #final = 0.4 * base_adj + 0.2 * impact_weight + 0.15 * maturity_weight + 0.25 * process_weight
-        # Patched: previous weighting (commented out)
-        final = 0.5 * base_adj + 0.25 * impact_weight + 0.15 * maturity_weight + 0.1 * process_weight
         results.append(
             {
                 "use_case_id": uc["id"],
                 "use_case_name_de": uc.get("name", {}).get("de", ""),
                 "score": round(final, 3),
                 "base_adj": base_adj,
-                #"base": base,
                 "impact": impact_weight,
                 "maturity": maturity_weight,
                 "process": process_weight,
@@ -318,50 +354,103 @@ def compute_overlap_stats(df):
 # Batch recomputation
 # ---------------------------------------------------------------------
 
-def run_batch_matching(recompute_all=False):
+def run_batch_matching(recompute_all=False, checkpoint_every=50, progress_every=10):
+    import time, traceback
     print(f"\n[Batch] Starting matching (recompute_all={recompute_all})...")
+    start_all = time.time()
 
-    usecases = json.load(open(USECASE_DB, "r", encoding="utf-8"))
-    df = pd.read_csv(ASSESSMENT_DB, encoding="utf-8-sig")
+    try:
+        usecases = json.load(open(USECASE_DB, "r", encoding="utf-8"))
+    except Exception as e:
+        print(f"[Batch] ❌ Failed to load USECASE_DB: {e}")
+        traceback.print_exc()
+        return
+
+    try:
+        df = pd.read_csv(ASSESSMENT_DB, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"[Batch] ❌ Failed to load ASSESSMENT_DB: {e}")
+        traceback.print_exc()
+        return
 
     peer_relations, uc_problem_sets = build_peer_relations(usecases, overlap_threshold=OVERLAP_THRESHOLD)
+    # normalize uc_problem_sets -> list of lists for deterministic iteration and speed
+    uc_problem_lists = [list(s) for s in uc_problem_sets]
+
     print(f"[Batch] Peer relations built for {len(peer_relations)} Use Cases. Mode={MATURITY_MODE}")
 
     if "MATCHES_SCORED" not in df.columns:
         df["MATCHES_SCORED"] = None
 
     if recompute_all:
-        target_idx = df.index
+        target_idx = list(df.index)
     else:
-        target_idx = df[df["MATCHES_SCORED"].isna() | (df["MATCHES_SCORED"].astype(str).str.strip() == "")].index
+        mask_missing = df["MATCHES_SCORED"].isna() | (df["MATCHES_SCORED"].astype(str).str.strip() == "")
+        target_idx = list(df[mask_missing].index)
 
-    for i in target_idx:
-        row = df.loc[i]
-        problems = prepare_assessment_problems(row.get("PROBLEM_TEXTS", ""))
-        customer_impact = parse_customer_impact(row.get("IMPACT_PRIORITIES", ""))
-        raw_procs = str(row.get("PROCESSES", "")).strip()
-        customer_processes = [p.strip() for p in raw_procs.split(";") if p.strip()] if raw_procs and raw_procs.lower() != "nan" else None
-        customer_maturity_levels = [m.strip() for m in str(row.get("MATURITY_LEVELS", "")).split(";") if m.strip()]
+    total_to_process = len(target_idx)
+    print(f"[Batch] Rows to process: {total_to_process}")
 
-        top_matches = match_assessment(
-            problems,
-            customer_impact,
-            usecases,
-            uc_problem_sets,
-            peer_relations,
-            customer_processes,
-            customer_maturity_levels,
-            debug=False,
-        )
-        formatted = "; ".join([
-            f"UC-{r.get('use_case_id', '?')}: {r.get('score', 0):.3f}"
-            for r in top_matches[:TOP_LIMIT]
-        ])
-        df.at[i, "MATCHES_SCORED"] = formatted
+    if total_to_process == 0:
+        print("[Batch] Nothing to do.")
+        return
 
+    processed = 0
+    t0 = time.time()
+    for count, i in enumerate(target_idx, start=1):
+        row_start = time.time()
+        try:
+            row = df.loc[i]
+            problems = prepare_assessment_problems(row.get("PROBLEM_TEXTS", ""))
+            customer_impact = parse_customer_impact(row.get("IMPACT_PRIORITIES", ""))
+            raw_procs = str(row.get("PROCESSES", "")).strip()
+            customer_processes = [p.strip() for p in raw_procs.split(";") if p.strip()] if raw_procs and raw_procs.lower() != "nan" else None
+            customer_maturity_levels = [m.strip() for m in str(row.get("MATURITY_LEVELS", "")).split(";") if m.strip()]
+
+            top_matches = match_assessment(
+                problems,
+                customer_impact,
+                usecases,
+                uc_problem_lists,    # use precomputed lists
+                peer_relations,
+                customer_processes,
+                customer_maturity_levels,
+                debug=False,
+            )
+            formatted = "; ".join([
+                f"UC-{r.get('use_case_id', '?')}: {r.get('score', 0):.3f}"
+                for r in top_matches[:TOP_LIMIT]
+            ])
+            df.at[i, "MATCHES_SCORED"] = formatted
+            processed += 1
+
+        except Exception as e:
+            print(f"[Batch] ⚠️ Error processing row {i}: {e}")
+            traceback.print_exc()
+            # keep going
+
+        # progress output and timing
+        row_elapsed = time.time() - row_start
+        if count % progress_every == 0 or count == 1 or count == total_to_process:
+            avg = (time.time() - t0) / max(1, count)
+            remaining = (total_to_process - count) * avg
+            print(f"[Batch] {count}/{total_to_process} processed, last_row={row_elapsed:.2f}s, avg_per_row={avg:.2f}s, est_remaining={remaining/60:.1f}min")
+            sys.stdout.flush()
+
+        # checkpoint save
+        if count % checkpoint_every == 0:
+            try:
+                df = compute_overlap_stats(df)
+                df.to_csv(ASSESSMENT_DB, index=False, encoding="utf-8-sig")
+                print(f"[Batch] checkpoint: wrote progress to {ASSESSMENT_DB} after {count} rows")
+            except Exception as e:
+                print(f"[Batch] ⚠️ Failed to write checkpoint: {e}")
+
+    # final save
     df = compute_overlap_stats(df)
     df.to_csv(ASSESSMENT_DB, index=False, encoding="utf-8-sig")
-    print(f"\n[Batch] ✅ Matching completed — results written to {ASSESSMENT_DB}")
+    total_time = time.time() - start_all
+    print(f"\n[Batch] ✅ Matching completed — {processed} rows processed in {total_time:.1f}s ({total_time/60:.1f}min).")
 
 # ---------------------------------------------------------------------
 # Inspect single assessment
