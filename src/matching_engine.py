@@ -726,6 +726,7 @@ def export_to_report_csv(
 
 # ---------------------------------------------------------------------
 #  Export assessment_db.csv to Google Sheet in batches to avoid API quotas
+# --export-in-batches --batch-size 100 --batch-delay 10
 # ---------------------------------------------------------------------
 def export_to_report_in_batches(
     csv_path,
@@ -735,12 +736,12 @@ def export_to_report_in_batches(
     worksheet_name,
     batch_size=50,
     start_idx=0,
-    delay_between_batches=60
+    delay_between_batches=60,
+    delay_between_rows=0.5  # Reduziert von 2
 ):
     """
     Export assessment_db.csv to Google Sheet in batches to avoid API quotas.
-    Processes batch_size rows starting at start_idx.
-    Returns next start index, or None if done.
+    Uses append_rows() to write multiple rows at once instead of one per call.
     """
 
     usecase_db = load_usecase_db(uc_json_path)
@@ -756,7 +757,6 @@ def export_to_report_in_batches(
     sheet_columns = ws.row_values(1)
     sheet_records = ws.get_all_records()
     
-    # Use vollständigen CREATED_AT (mit Zeit) statt nur Datum
     existing_keys = set(
         (
             str(row.get("CREATED_AT", "")).strip(),
@@ -775,12 +775,12 @@ def export_to_report_in_batches(
     batch_df = df.iloc[start_idx:end_idx]
 
     new_rows_count = 0
+    rows_to_append = []  # Sammeln statt einzeln schreiben
 
     for idx, row in batch_df.iterrows():
         created_at_raw = str(row["CREATED_AT"]).strip()
         email = str(row["EMAIL"]).strip()
         
-        # Verwende den vollständigen Timestamp als Key
         key = (created_at_raw, email)
 
         if key in existing_keys:
@@ -828,15 +828,30 @@ def export_to_report_in_batches(
                     val = ""
                 values_for_insert.append(val)
 
-            # Hier wird tatsächlich in Google Sheet geschrieben
-            ws.append_row(values_for_insert)
+            rows_to_append.append(values_for_insert)
+            new_rows_count += 1
 
         existing_keys.add(key)
-        new_rows_count += 1
 
-    print(f"[Batch] Exported {new_rows_count} new row(s) (rows {start_idx}-{end_idx}).")
+    # Schreibe alle Rows auf einmal
+    if rows_to_append:
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                ws.append_rows(rows_to_append)  # append_rows statt append_row
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 60 * (attempt + 2)
+                    print(f"[Batch] ⚠️ Attempt {attempt+1}/{max_retries} failed: {e}")
+                    print(f"[Batch] Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"[Batch] ❌ Failed after {max_retries} attempts.")
+                    break
+
+    print(f"[Batch] ✅ Exported {new_rows_count} new row(s) (rows {start_idx}-{end_idx}/{total_rows}).")
     
-    # Return next index if there are more rows to process
     if end_idx < total_rows:
         return end_idx
     return None
@@ -879,9 +894,16 @@ if __name__ == "__main__":
    
 
     elif args.export_in_batches:
-            next_idx = args.start_idx
-            while next_idx is not None:
-                print(f"Starting batch export from row {next_idx}")
+        next_idx = args.start_idx
+        batch_count = 0
+        
+        while next_idx is not None:
+            batch_count += 1
+            print(f"\n{'='*60}")
+            print(f"[BATCH {batch_count}] Starting batch export from row {next_idx}")
+            print(f"{'='*60}")
+            
+            try:
                 next_idx = export_to_report_in_batches(
                     csv_path=ASSESSMENT_DB,
                     uc_json_path=USECASE_DB,
@@ -892,9 +914,23 @@ if __name__ == "__main__":
                     start_idx=next_idx,
                     delay_between_batches=args.batch_delay
                 )
+                
                 if next_idx is not None:
-                    print(f"Waiting {args.batch_delay} seconds before next batch...")
-            print("Batch export completed.")
+                    print(f"[BATCH {batch_count}] ⏳ Waiting {args.batch_delay} seconds before next batch...\n")
+                    for i in range(args.batch_delay, 0, -10):
+                        print(f"[BATCH {batch_count}] {i}s remaining...", end="\r")
+                        time.sleep(10)
+                    print()  # Newline
+                else:
+                    print("\n[BATCH] 🎉 All rows processed successfully!")
+                    
+            except Exception as e:
+                print(f"[BATCH {batch_count}] ❌ Error: {e}")
+                print(f"[BATCH {batch_count}] Waiting 5 minutes before retry from row {next_idx}...")
+                time.sleep(300)  # 5 Minuten warten
+                continue
+
+        print(f"\n[COMPLETE] Exported {batch_count} batches total.")
 
 
     elif args.inspect:
