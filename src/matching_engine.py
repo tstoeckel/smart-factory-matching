@@ -258,6 +258,48 @@ def problem_matches_optimized(problem, uc_problem, token_low=0.3, token_high=0.7
     # only now expensive similarity
     return string_similarity(p, u) >= sim_thresh
 
+# -------------------------
+# lightweight similarity cache (no extra imports)
+# -------------------------
+_SIM_CACHE = {}  # key: (p,u) -> float 0..1
+
+def problem_similarity_score(problem, uc_problem):
+    """Returns 0.0 - 1.0 continuous score with local caching (no extra imports)"""
+    p = problem.lower().strip()
+    u = uc_problem.lower().strip()
+    if not p or not u:
+        return 0.0
+    key = (p, u)
+    if key in _SIM_CACHE:
+        return _SIM_CACHE[key]
+
+    # Substring: maximal similarity
+    if p in u or u in p:
+        _SIM_CACHE[key] = 1.0
+        return 1.0
+
+    # Token overlap quick heuristic
+    p_words = set(p.split())
+    u_words = set(u.split())
+    if not p_words or not u_words:
+        _SIM_CACHE[key] = 0.0
+        return 0.0
+
+    overlap = len(p_words & u_words) / max(len(p_words), len(u_words))
+    if overlap >= 0.7:
+        _SIM_CACHE[key] = 0.9
+        return 0.9
+    if overlap >= 0.4:
+        val = 0.5 + overlap * 0.2
+        _SIM_CACHE[key] = val
+        return val
+
+    # expensive Levenshtein only now
+    sim = string_similarity(p, u)
+    val = sim if sim > 0.4 else 0.0
+    _SIM_CACHE[key] = val
+    return val
+
 # ---------------------------------------------------------------------
 # Matching logic
 # ---------------------------------------------------------------------
@@ -273,10 +315,43 @@ def match_assessment(
     debug=False,
 ):
     results = []
-    uc_problem_lists = [[s.lower().strip() for s in probs if s and str(s).strip()] for probs in uc_problem_sets]
-    for uc, uc_problems in zip(usecases, uc_problem_lists):
 
-        # Patched combined filtering logic
+    # prepare uc_problem_lists (lowercased strings)
+    uc_problem_lists = [[s.lower().strip() for s in probs if s and str(s).strip()] for probs in uc_problem_sets]
+
+    # Build token sets and inverted index once (reduces candidate UCs)
+    def _tokenize(s):
+        return set(t for t in re.findall(r"\w+", s.lower()) if len(t) > 2)
+
+    uc_token_sets = []
+    inverted_index = {}
+    for idx, probs in enumerate(uc_problem_lists):
+        toks = set()
+        for p in probs:
+            toks |= _tokenize(p)
+        uc_token_sets.append(toks)
+        for t in toks:
+            inverted_index.setdefault(t, set()).add(idx)
+
+    # Pre-tokenize assessment problems
+    problem_tokens = [ _tokenize(p) for p in problems ]
+
+    # build candidates = union of UC indices that share any token with any problem
+    candidate_idxs = set()
+    for toks in problem_tokens:
+        for t in toks:
+            if t in inverted_index:
+                candidate_idxs |= inverted_index[t]
+    # fallback: if no candidate found, evaluate all
+    if not candidate_idxs:
+        candidate_idxs = set(range(len(usecases)))
+
+    # Evaluate only candidate UCs (faster)
+    for idx in sorted(candidate_idxs):
+        uc = usecases[idx]
+        uc_problems = uc_problem_lists[idx]
+
+        # existing filtering logic (process/maturity) unchanged
         if customer_processes and customer_maturity_levels:
             proc_match = any(
                 proc in get_uc_processes(uc) for proc in [p.lower() for p in customer_processes]
@@ -296,37 +371,32 @@ def match_assessment(
             if not any(level.lower() in uc_level for level in customer_maturity_levels):
                 continue
 
-        # FUZZY MATCHING statt exaktes Substring-Matching
-        matched_count = 0
-        for p in problems:
-            for u in uc_problems:
-                if problem_matches_optimized(p, u):
-                    matched_count += 1
-                    break
-
-        # NEUE LOGIK: Similarity Scores statt binär
+        # Continuous similarity: best match per problem (0..1)
         match_scores = []
         for p in problems:
             best_sim = 0.0
             for u in uc_problems:
-                sim = problem_similarity_score(p, u)  # 0.0 - 1.0
-                best_sim = max(best_sim, sim)
+                sim = problem_similarity_score(p, u)  # cached
+                if sim > best_sim:
+                    best_sim = sim
+                    # early exit for near-perfect match to save time
+                    if best_sim >= 0.95:
+                        break
             match_scores.append(best_sim)
-        
-        # base = Durchschnitt der Similarities, nicht Count
-        base = sum(match_scores) / len(problems) if problems else 0
+
+        base = sum(match_scores) / len(match_scores) if match_scores else 0.0
         base_adj = base
 
         maturity_weight = compute_maturity_weight(uc, peer_relations, usecases, debug)
         impact_weight = compute_impact_weight(uc.get("impact", []), customer_impact)
         process_weight = compute_process_spread_weight(uc, customer_processes)
 
-        # NEUE GEWICHTE
+        # WEIGHTS tuned earlier
         final = (
-            0.40 * base_adj +           # von 0.60
-            0.35 * impact_weight +      # von 0.25
-            0.15 * maturity_weight +    # von 0.10
-            0.10 * process_weight       # von 0.05
+            0.60 * base_adj +
+            0.15 * impact_weight +
+            0.15 * maturity_weight +
+            0.10 * process_weight
         )
 
         results.append(
@@ -341,32 +411,6 @@ def match_assessment(
             }
         )
     return sorted(results, key=lambda x: x["score"], reverse=True)
-
-def problem_similarity_score(problem, uc_problem):
-    """Returns 0.0 - 1.0 continuous score"""
-    p = problem.lower().strip()
-    u = uc_problem.lower().strip()
-    
-    if not p or not u:
-        return 0.0
-    
-    # Substring: max score
-    if p in u or u in p:
-        return 1.0
-    
-    # Token overlap
-    p_words = set(p.split())
-    u_words = set(u.split())
-    overlap = len(p_words & u_words) / max(len(p_words), len(u_words))
-    
-    if overlap >= 0.7:
-        return 0.9
-    if overlap >= 0.4:
-        return 0.5 + overlap * 0.2
-    
-    # Levenshtein
-    sim = string_similarity(p, u)
-    return sim if sim > 0.4 else 0.0
 
 # ---------------------------------------------------------------------
 # Overlap computation
