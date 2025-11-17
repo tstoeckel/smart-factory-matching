@@ -166,19 +166,28 @@ def compute_maturity_weight(uc, peer_relations, usecases, debug=False):
 
 def compute_impact_weight(uc_impact, customer_impact):
     if not customer_impact or not uc_impact:
-        return 1.0
-    uc_imp = {i.get("label", {}).get("de", "").lower(): i.get("value", 0) for i in uc_impact}
+        return 0.5  # ← Neutral statt 1.0
+    
+    uc_imp = {i.get("label", {}).get("de", "").lower(): i.get("value", 0) 
+              for i in uc_impact}
     num, den = 0.0, 0.0
+    
     for k, v in customer_impact.items():
         if k in uc_imp:
             num += uc_imp[k] * v
             den += v
+    
     if den == 0:
-        return 1.0
-    # Damit wird die Division nicht mehr durch den Faktor 10 zusätzlich skaliert, was die Werte im Bereich [0.1, 1.0] feiner verteilt und das Matching sensibler macht.
-    #return max(0.1, min(1.0, num / (10 * den)))
-    return max(0.1, min(1.0, num / den))
-    #return max(0.1, min(1.0, (num / den) ** 1.5))  # War 1.2
+        return 0.5
+    
+    # NEUE FORMEL - besser differenzierend
+    raw = num / den
+    
+    # Normalisiere gegen max Impact (10 pro Dimension)
+    # Customer hat typisch: 2-3 Dimensionen * ~8-10 Wert = 16-30 max
+    normalized = min(1.0, raw / 10)
+    
+    return max(0.1, normalized)  # Min 10%, Max 100%
 
 
 
@@ -295,14 +304,30 @@ def match_assessment(
                     matched_count += 1
                     break
 
-        base = matched_count / max(len(problems), 1)
+        # NEUE LOGIK: Similarity Scores statt binär
+        match_scores = []
+        for p in problems:
+            best_sim = 0.0
+            for u in uc_problems:
+                sim = problem_similarity_score(p, u)  # 0.0 - 1.0
+                best_sim = max(best_sim, sim)
+            match_scores.append(best_sim)
+        
+        # base = Durchschnitt der Similarities, nicht Count
+        base = sum(match_scores) / len(problems) if problems else 0
         base_adj = base
 
         maturity_weight = compute_maturity_weight(uc, peer_relations, usecases, debug)
         impact_weight = compute_impact_weight(uc.get("impact", []), customer_impact)
         process_weight = compute_process_spread_weight(uc, customer_processes)
 
-        final = 0.60 * base_adj + 0.25 * impact_weight + 0.10 * maturity_weight + 0.05 * process_weight
+        # NEUE GEWICHTE
+        final = (
+            0.40 * base_adj +           # von 0.60
+            0.35 * impact_weight +      # von 0.25
+            0.15 * maturity_weight +    # von 0.10
+            0.10 * process_weight       # von 0.05
+        )
 
         results.append(
             {
@@ -316,6 +341,32 @@ def match_assessment(
             }
         )
     return sorted(results, key=lambda x: x["score"], reverse=True)
+
+def problem_similarity_score(problem, uc_problem):
+    """Returns 0.0 - 1.0 continuous score"""
+    p = problem.lower().strip()
+    u = uc_problem.lower().strip()
+    
+    if not p or not u:
+        return 0.0
+    
+    # Substring: max score
+    if p in u or u in p:
+        return 1.0
+    
+    # Token overlap
+    p_words = set(p.split())
+    u_words = set(u.split())
+    overlap = len(p_words & u_words) / max(len(p_words), len(u_words))
+    
+    if overlap >= 0.7:
+        return 0.9
+    if overlap >= 0.4:
+        return 0.5 + overlap * 0.2
+    
+    # Levenshtein
+    sim = string_similarity(p, u)
+    return sim if sim > 0.4 else 0.0
 
 # ---------------------------------------------------------------------
 # Overlap computation
