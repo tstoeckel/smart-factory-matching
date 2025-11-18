@@ -75,16 +75,16 @@ Each Use Case is scored against customer assessments by four weighted factors:
 
 ### Scoring Formula
 
-final_score = 0.60 * base + 0.15 * impact + 0.15 * maturity + 0.10 * process
+final_score = 0.50 * base + 0.2 * impact + 0.1 * maturity + 0.20 * process
 
 text
 
 | Weight | Factor   | Description                                                            |
 |-------:|----------|------------------------------------------------------------------------|
-| 0.60   | Base     | Problem text similarity between assessment and Use Case.              |
-| 0.15   | Impact   | Alignment with customer's impact priorities.                          |
-| 0.15   | Maturity | Fit of Use Case maturity to customer's selected maturity.              |
-| 0.10   | Process  | Relevance of Use Case’s process domain to customer's selected processes.|
+| 0.50   | Base     | Problem text similarity between assessment and Use Case.              |
+| 0.20   | Impact   | Alignment with customer's impact priorities.                          |
+| 0.10   | Maturity | Fit of Use Case maturity to customer's selected maturity.              |
+| 0.20   | Process  | Relevance of Use Case’s process domain to customer's selected processes.|
 
 ---
 
