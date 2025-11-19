@@ -153,7 +153,7 @@ Foundational Use Cases for digital infrastructure:
 ## process for Report
 - `--import-sheet`: Import assessments from Google Sheets.
 - `--recompute-all`: Force recompute for all assessments. 
-- `--export-in-batches`: Batch export with controls for API quota. --export-in-batches --batch-size 100 --batch-delay 10
+- `--export-in-batches`: Batch export with controls for API quota. --export-in-batches --batch-size 100 --batch-delay 5
 
 ## Google Sheets Integration
 

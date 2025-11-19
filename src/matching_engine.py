@@ -393,7 +393,7 @@ def match_assessment(
 
         # WEIGHTS tuned earlier
         final = (
-            0.50 * base_adj +
+            0.5 * base_adj +
             0.2 * impact_weight +
             0.1 * maturity_weight +
             0.2 * process_weight
